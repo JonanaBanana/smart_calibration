@@ -22,7 +22,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from smart_calibration.image_preprocessing import (
     FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS, to_mono8)
 from smart_calibration.qos import image_qos
-from smart_calibration_interfaces.msg import BoardDetection
+from smart_calibration_interfaces.msg import BoardDetection, ToneHistogram
 
 # Buffers for pairing images with detections by timestamp; they must cover the detection
 # latency (a detection arrives after its preview / raw frame).
@@ -41,6 +41,7 @@ Snapshot = collections.namedtuple('Snapshot', [
     'raw_detection',      # the BoardDetection of that raw frame
     'newest_raw',         # newest raw camera Frame, or None
     'parameters',         # {name: value} of the calibration node, as far as known
+    'histogram',          # newest ToneHistogram, or None
     'preview_fps',
     'detection_fps',
     'raw_fps',
@@ -124,6 +125,10 @@ class GuiNode(Node):
             QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
         self.detection_sub = self.create_subscription(
             BoardDetection, f'{self.target}/detection', self.detection_callback, 10)
+        self._histogram = None
+        self.histogram_sub = self.create_subscription(
+            ToneHistogram, f'{self.target}/histogram', self.histogram_callback,
+            QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
 
         # Raw camera stream: subscribed only while the raw view is switched on.
         self._raw_wanted = False
@@ -163,6 +168,10 @@ class GuiNode(Node):
             self._newest_detection = msg
             self._newest_detection_received = now
             self._detection_rate.tick(now)
+
+    def histogram_callback(self, msg):
+        with self._lock:
+            self._histogram = msg
 
     def raw_callback(self, msg):
         try:
@@ -213,7 +222,7 @@ class GuiNode(Node):
             return Snapshot(
                 self._newest_detection, age, preview, preview_detection, raw_frame,
                 raw_detection, self._raw_frames[-1] if self._raw_frames else None,
-                dict(self.parameters), self._preview_rate.rate(now),
+                dict(self.parameters), self._histogram, self._preview_rate.rate(now),
                 self._detection_rate.rate(now), self._raw_rate.rate(now))
 
     # ------------------------------------------------------------------ parameters

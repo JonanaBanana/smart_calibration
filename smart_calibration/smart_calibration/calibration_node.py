@@ -1,3 +1,4 @@
+import math
 import signal
 import sys
 import threading
@@ -17,19 +18,46 @@ from sensor_msgs.msg import CompressedImage, Image
 from smart_calibration.detection import detect_chessboard, sb_flags
 from smart_calibration.environment import check_environment
 from smart_calibration.image_preprocessing import FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS
-from smart_calibration.preprocessing import preprocess
+from smart_calibration.preprocessing import preprocess, preprocess_with_histograms
 from smart_calibration.qos import image_qos
-from smart_calibration_interfaces.msg import BoardDetection
+from smart_calibration.views import Assessment, ViewCollection
+from smart_calibration_interfaces.msg import BoardDetection, ToneHistogram
 
 # Parameters that can be changed while the node runs (e.g. from the GUI's controls).
 LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
-                   'detector_normalize', 'detector_exhaustive', 'detector_accuracy')
+                   'contrast_strength', 'contrast_midpoint',
+                   'detector_normalize', 'detector_exhaustive', 'detector_accuracy',
+                   'max_board_speed', 'max_grid_irregularity', 'min_view_distance')
 
 
 def float_range(low, high, description):
     return ParameterDescriptor(
         description=description,
         floating_point_range=[FloatingPointRange(from_value=low, to_value=high, step=0.0)])
+
+
+def check_result(value, ok):
+    """(check status, value) for a BoardDetection; None means not evaluated / not measurable."""
+    status = (BoardDetection.CHECK_NOT_EVALUATED if ok is None
+              else BoardDetection.CHECK_PASSED if ok else BoardDetection.CHECK_FAILED)
+    return status, math.nan if value is None else value
+
+
+def fill_checks(detection, assessment):
+    """Copy the view selection checks into a BoardDetection (assessment None: no board)."""
+    if assessment is None:
+        assessment = Assessment(None, None, None, None, None, None, None)
+    detection.speed_check, detection.board_speed = check_result(
+        assessment.speed, assessment.speed_ok)
+    detection.irregularity_check, detection.grid_irregularity = check_result(
+        assessment.irregularity, assessment.irregularity_ok)
+    detection.distance_check, detection.view_distance = check_result(
+        assessment.distance, assessment.distance_ok)
+    detection.kept = assessment.view is not None
+
+
+def format_value(value, spec):
+    return '-' if value is None else format(value, spec)
 
 
 class CalibrationNode(Node):
@@ -45,6 +73,9 @@ class CalibrationNode(Node):
             integer_range=[IntegerRange(from_value=3, to_value=100, step=1)])
         self.board_cols = self.declare_parameter('board_cols', 9, corner_count).value
         self.board_rows = self.declare_parameter('board_rows', 6, corner_count).value
+        self.square_size = self.declare_parameter('square_size', 0.025, float_range(
+            0.001, 1.0, 'Side length of one chessboard square in metres (measure the printed '
+                        'board). Scales the board poses only, not the intrinsics.')).value
         # findChessboardCornersSB flags (see detection.py and explore.md).
         self.declare_parameter('detector_normalize', False, ParameterDescriptor(
             description='Histogram equalization before detection.'))
@@ -60,6 +91,23 @@ class CalibrationNode(Node):
             0.0, 50.0, 'Intensity percentile mapped to black.'))
         self.declare_parameter('stretch_high_percentile', 99.5, float_range(
             50.0, 100.0, 'Intensity percentile mapped to white.'))
+        self.declare_parameter('contrast_strength', 0.0, float_range(
+            0.0, 10.0, 'Steepness of the S-shaped contrast curve after gamma (0: off).'))
+        self.declare_parameter('contrast_midpoint', 0.5, float_range(
+            0.0, 1.0, 'Grey level (0-1) the contrast curve keeps; darker gets darker, lighter '
+                      'gets lighter. Best between the dark and light squares\' histogram peaks.'))
+        # View selection (see views.py).
+        self.declare_parameter('max_board_speed', 100.0, float_range(
+            1.0, 10000.0, 'Detections are only kept while the board moves at most this many '
+                          'pixels per second (mean corner movement), against motion blur.'))
+        self.declare_parameter('max_grid_irregularity', 0.3, float_range(
+            0.0, 10.0, 'Detections are only kept if no corner deviates from the smooth grid of '
+                       'its neighbours by more than this (third difference along rows and '
+                       'columns, in square sizes): rejects detections with a misplaced corner.'))
+        self.declare_parameter('min_view_distance', 0.05, float_range(
+            0.0, 1.0, 'A detection is only kept if its board outline differs from every kept '
+                      'view by at least this much: mean distance of the four outline corners, '
+                      'as a fraction of the image diagonal.'))
         # Live parameter values, read once per frame by the worker.
         self.live = {name: self.get_parameter(name).value for name in LIVE_PARAMETERS}
 
@@ -74,11 +122,15 @@ class CalibrationNode(Node):
 
         self.bridge = CvBridge()
         self.image_size = None  # (width, height) of the incoming images
+        # Detections kept for calibration (touched by the detection worker only).
+        self.views = ViewCollection(self.board_cols, self.board_rows, self.square_size)
 
         self.detection_pub = self.create_publisher(BoardDetection, '~/detection', 10)
         # The image the detector works on, for display (the GUI does not need the raw stream).
         self.preview_pub = self.create_publisher(
             CompressedImage, '~/preview', QoSProfile(depth=2))
+        self.histogram_pub = self.create_publisher(
+            ToneHistogram, '~/histogram', QoSProfile(depth=2))
 
         # Detection is slower than the camera, so it runs in a worker thread on the newest frame
         # only; frames that arrive while it is busy are dropped. The image callback never blocks.
@@ -99,7 +151,8 @@ class CalibrationNode(Node):
         self.image_sub = self.create_subscription(Image, 'image', self.image_callback, qos)
         self.get_logger().info(
             f'waiting for images on {image_topic} ({qos.reliability.name.lower()}), looking for a '
-            f'{self.board_cols}x{self.board_rows} board, publishing detections on '
+            f'{self.board_cols}x{self.board_rows} board ({self.square_size * 1000:g} mm squares), '
+            'publishing detections on '
             f'{self.detection_pub.topic_name}')
 
     def on_set_parameters(self, parameters):
@@ -146,8 +199,16 @@ class CalibrationNode(Node):
         if image is None:
             return
         live = self.live
-        gray = preprocess(image, live['stretch_low_percentile'],
-                          live['stretch_high_percentile'], live['gamma'])
+        tone = (live['stretch_low_percentile'], live['stretch_high_percentile'], live['gamma'],
+                live['contrast_strength'], live['contrast_midpoint'])
+        # Preview and histograms only while something (the GUI) is watching.
+        watched = self.preview_pub.get_subscription_count() > 0
+        if watched:
+            gray, before, after = preprocess_with_histograms(image, *tone)
+            histogram = ToneHistogram(header=msg.header, before_contrast=before.tolist(),
+                                      after_contrast=after.tolist())
+        else:
+            gray = preprocess(image, *tone)
 
         size = (gray.shape[1], gray.shape[0])
         if size != self.image_size:
@@ -177,14 +238,33 @@ class CalibrationNode(Node):
             detection.corners = corners.ravel().tolist()
         detection.detection_time_ms = detection_time_ms
 
+        assessment = None
+        if corners is not None:
+            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            assessment = self.views.consider(
+                corners, size, stamp, live['max_board_speed'], live['max_grid_irregularity'],
+                live['min_view_distance'])
+            if assessment.view is not None:
+                self.get_logger().info(f'kept view {len(self.views)}')
+        fill_checks(detection, assessment)
+        detection.kept_views = len(self.views)
+
         # Preview first: the GUI pairs both by timestamp and shows a pair once it is complete.
-        if self.preview_pub.get_subscription_count() > 0:
+        if watched:
             self.preview_pub.publish(self.make_preview(gray, msg.header))
+            self.histogram_pub.publish(histogram)
         self.detection_pub.publish(detection)
 
+        checks = ''
+        if assessment is not None:
+            checks = (f', moving {format_value(assessment.speed, ".0f")} px/s, grid irregularity '
+                      f'{format_value(assessment.irregularity, ".3f")}, '
+                      f'{format_value(assessment.distance, ".3f")} from the nearest view'
+                      + (', kept' if detection.kept else ''))
         self.get_logger().debug(
             f'{size[0]}x{size[1]} frame from {msg.encoding!r}: board '
-            f'{"found" if detection.found else "not found"} in {detection_time_ms:.1f} ms')
+            f'{"found" if detection.found else "not found"} in {detection_time_ms:.1f} ms'
+            + checks)
 
     def make_preview(self, gray, header):
         if gray.shape[1] > self.preview_max_width:

@@ -8,17 +8,33 @@ calibration_node:
     # Chessboard: number of INNER corners (squares - 1) along each axis.
     board_cols: 6
     board_rows: 7
+    # Side length of one square in metres. Placeholder: measure the printed board.
+    square_size: 0.1
 
     # Preprocessing: contrast stretch between these intensity percentiles, then gamma.
     stretch_low_percentile: 0.5
     stretch_high_percentile: 99.5
-    gamma: 0.45
+    gamma: 0.5
+    # S-shaped contrast curve after gamma (0: off); midpoint = grey level (0-1) it keeps.
+    contrast_strength: 3.0
+    contrast_midpoint: 0.8
 
     # findChessboardCornersSB flags. exhaustive + accuracy gave ~80-90 % detection with this
     # camera (accuracy also lowers the corner error, at ~4x the detection time).
     detector_normalize: false
     detector_exhaustive: true
     detector_accuracy: false
+
+    # View selection: only keep detections while the board moves at most this many pixels per
+    # second (mean corner movement since the previous detection), against motion blur.
+    max_board_speed: 50.0
+    # ... and only if no corner is misplaced: largest deviation of a corner from the smooth grid of
+    # its neighbours (third difference along rows and columns), in square sizes. Correct boards
+    # stay below ~0.1 (up to ~0.2 for very small squares); a corner off by 0.15 squares gives 0.35+.
+    max_grid_irregularity: 0.3
+    # ... and only if the board outline (four outermost corners) differs from every kept view by
+    # at least this much: mean corner distance as a fraction of the image diagonal.
+    min_view_distance: 0.03
 
     # Camera subscription: auto matches the camera publisher's reliability.
     image_qos: auto

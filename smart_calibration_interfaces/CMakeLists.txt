@@ -19,6 +19,7 @@ find_package(geometry_msgs REQUIRED)
 # List every interface explicitly (e.g. "msg/BoardDetection.msg", "srv/Calibrate.srv").
 set(interface_files
   "msg/BoardDetection.msg"
+  "msg/ToneHistogram.msg"
 )
 
 # rosidl_generate_interfaces() fails without any files, so it is only called once the first

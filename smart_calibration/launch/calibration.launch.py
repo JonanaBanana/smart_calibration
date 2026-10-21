@@ -19,6 +19,10 @@ def generate_launch_description():
                 [FindPackageShare('smart_calibration'), 'config', 'ircam_wide.yaml']),
             description='calibration_node parameters: board size, preprocessing, detector '
                         'flags (see config/ircam_wide.yaml).'),
+        DeclareLaunchArgument(
+            'log_level',
+            default_value='info',
+            description='calibration_node log level; debug logs a line per frame.'),
         Node(
             package='smart_calibration',
             executable='calibration_node',
@@ -26,5 +30,6 @@ def generate_launch_description():
             output='screen',
             remappings=[('image', LaunchConfiguration('image_topic'))],
             parameters=[LaunchConfiguration('params_file')],
+            ros_arguments=['--log-level', LaunchConfiguration('log_level')],
         ),
     ])

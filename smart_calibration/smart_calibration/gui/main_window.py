@@ -6,23 +6,28 @@ import time
 import numpy as np
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QSlider, QVBoxLayout,
-    QWidget)
+    QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QVBoxLayout, QWidget)
 
+from smart_calibration.gui.histogram_widget import HistogramWidget
+from smart_calibration.gui.parameter_slider import ParameterSlider
 from smart_calibration.gui.video_widget import VideoWidget
+from smart_calibration_interfaces.msg import BoardDetection
 
 REFRESH_INTERVAL_MS = 33
 # Without a detection for this long, the calibration node is considered gone.
 DETECTION_TIMEOUT_S = 1.0
+# After sending, wait this long for the node to confirm before showing its value again.
+CONFIRM_TIMEOUT_S = 1.0
+# The status box shows "kept" this long after a view was kept, so it can be noticed.
+KEPT_HIGHLIGHT_S = 1.0
 
 # Gamma slider: logarithmic, so 1.0 is in the middle and 1/GAMMA_LIMIT .. GAMMA_LIMIT at the ends
 # (matches the calibration node's parameter range 0.2 - 5.0).
 GAMMA_LIMIT = 5.0
 GAMMA_STEPS = 100
-# Slider moves within this time are sent to the calibration node as one parameter update.
-SEND_DELAY_MS = 100
-# After sending, wait this long for the node to confirm before showing its value again.
-CONFIRM_TIMEOUT_S = 1.0
+# Contrast curve sliders (calibration node ranges: strength 0 - 10, midpoint 0 - 1).
+CONTRAST_STEPS_PER_UNIT = 5
+MIDPOINT_STEPS = 100
 
 
 # Detector flag parameters of the calibration node: (name, checkbox label, tooltip).
@@ -35,7 +40,8 @@ DETECTOR_FLAGS = (
     ('detector_accuracy', 'accuracy (~4x slower)',
      'Upsamples the image 2x inside the detector: more accurate corners, ~4x detection time.'),
 )
-REMOTE_PARAMETERS = ('gamma',) + tuple(name for name, _, _ in DETECTOR_FLAGS)
+REMOTE_PARAMETERS = ('gamma', 'contrast_strength', 'contrast_midpoint', 'board_cols',
+                     'board_rows') + tuple(name for name, _, _ in DETECTOR_FLAGS)
 
 
 def gamma_to_slider(gamma):
@@ -53,6 +59,38 @@ def detection_corners(detection):
         return None
     return np.asarray(detection.corners, dtype=np.float32).reshape(
         detection.rows, detection.cols, 2)
+
+
+def check_line(label, status, value, failed_state='fail'):
+    """Status box line (label, value, mark, state) for one of BoardDetection's checks."""
+    if status == BoardDetection.CHECK_PASSED:
+        return label, value, '✓', 'pass'
+    if status == BoardDetection.CHECK_FAILED:
+        return label, value, '✗', failed_state
+    return label, '-', '', 'unknown'
+
+
+def status_lines(detection, kept_label=None):
+    """
+    Status box lines for a BoardDetection: board found, then its view selection checks.
+
+    kept_label replaces the new-view line (shown for a while after a view was kept).
+    """
+    if not detection.found:
+        return [('board', 'not found', '', 'fail')] + [
+            (label, '-', '', 'unknown') for label in ('motion', 'corners', 'new view')]
+    lines = [('board', 'found', '', 'pass'),
+             check_line('motion', detection.speed_check, f'{detection.board_speed:.0f} px/s'),
+             check_line('corners', detection.irregularity_check,
+                        f'{detection.grid_irregularity:.2f}')]
+    if kept_label:
+        lines.append(('new view', kept_label, '', 'kept'))
+    else:
+        # The first view passes without a distance. Too close to a kept view is no error: amber.
+        distance = ('first' if math.isnan(detection.view_distance)
+                    else f'{detection.view_distance:.3f}')
+        lines.append(check_line('new view', detection.distance_check, distance, 'warn'))
+    return lines
 
 
 def form_box(title, rows):
@@ -75,6 +113,7 @@ class MainWindow(QMainWindow):
         self._shown_frame = None
         self._shown_detection = None
         self._shown_message = None
+        self._kept_highlight = None  # (label, monotonic time until which it is shown)
         self._pending = {}  # parameter name -> (value sent, time sent), until the node confirms
 
         # View
@@ -82,23 +121,41 @@ class MainWindow(QMainWindow):
         self.raw_toggle.setToolTip(
             'Show the camera stream instead of the calibration node\'s preprocessed preview. '
             'Needs the full camera stream: best on the same machine as the camera.')
+        # Mouse only: as the first widget it would get the keyboard focus when the window opens,
+        # and a stray Space key press (e.g. typing in the terminal as the window appears) would
+        # switch it on.
+        self.raw_toggle.setFocusPolicy(Qt.NoFocus)
         self.raw_toggle.toggled.connect(self.node.set_raw_enabled)
         view_box = QGroupBox('View')
         QVBoxLayout(view_box).addWidget(self.raw_toggle)
 
-        # Preprocessing
-        self.gamma_slider = QSlider(Qt.Horizontal)
-        self.gamma_slider.setRange(-GAMMA_STEPS, GAMMA_STEPS)
-        self.gamma_slider.setEnabled(False)  # until the calibration node's value is known
-        self.gamma_slider.valueChanged.connect(self.on_gamma_slider)
-        self.gamma_value = QLabel('-')
-        self.gamma_value.setMinimumWidth(36)
-        gamma_row = QWidget()
-        gamma_layout = QHBoxLayout(gamma_row)
-        gamma_layout.setContentsMargins(0, 0, 0, 0)
-        gamma_layout.addWidget(self.gamma_slider, 1)
-        gamma_layout.addWidget(self.gamma_value)
-        detection_box = form_box('Detection', [('gamma:', gamma_row)])
+        # Detection: tone mapping sliders, histogram, detector flags
+        self.sliders = {
+            'gamma': ParameterSlider(
+                'gamma', -GAMMA_STEPS, GAMMA_STEPS, gamma_to_slider, slider_to_gamma,
+                self.send_parameter),
+            'contrast_strength': ParameterSlider(
+                'contrast_strength', 0, 10 * CONTRAST_STEPS_PER_UNIT,
+                lambda value: round(value * CONTRAST_STEPS_PER_UNIT),
+                lambda position: position / CONTRAST_STEPS_PER_UNIT,
+                self.send_parameter, '{:.1f}'),
+            'contrast_midpoint': ParameterSlider(
+                'contrast_midpoint', 0, MIDPOINT_STEPS,
+                lambda value: round(value * MIDPOINT_STEPS),
+                lambda position: position / MIDPOINT_STEPS, self.send_parameter),
+        }
+        self.sliders['gamma'].setToolTip('> 1 brightens dark regions, < 1 darkens bright ones.')
+        self.sliders['contrast_strength'].setToolTip(
+            'Steepness of the S-shaped contrast curve after gamma (0: off).')
+        self.sliders['contrast_midpoint'].setToolTip(
+            'Grey level the contrast curve keeps: darker gets darker, lighter gets lighter.')
+        self.histogram = HistogramWidget()
+        self._shown_histogram = None
+        detection_box = form_box('Detection', [
+            ('gamma:', self.sliders['gamma']),
+            ('contrast:', self.sliders['contrast_strength']),
+            ('midpoint:', self.sliders['contrast_midpoint'])])
+        detection_box.layout().addRow(self.histogram)
         self.flag_boxes = {}
         for name, label, tooltip in DETECTOR_FLAGS:
             box = QCheckBox(label)
@@ -107,15 +164,13 @@ class MainWindow(QMainWindow):
             box.toggled.connect(lambda checked, name=name: self.send_parameter(name, checked))
             detection_box.layout().addRow(box)
             self.flag_boxes[name] = box
-        self._send_timer = QTimer(self)
-        self._send_timer.setSingleShot(True)
-        self._send_timer.setInterval(SEND_DELAY_MS)
-        self._send_timer.timeout.connect(self.send_gamma)
 
-        # Info
-        self.board_found = QLabel('-')
-        self.board_grid = QLabel('-')
-        board_box = form_box('Board', [('found:', self.board_found), ('grid:', self.board_grid)])
+        # Info (per-frame detection results are in the video's status box)
+        self.board_size = QLabel('-')
+        self.board_size.setToolTip('Inner corners the calibration node looks for (cols x rows).')
+        self.kept_views = QLabel('-')
+        views_box = form_box('Calibration views', [('board:', self.board_size),
+                                                   ('kept:', self.kept_views)])
         self.camera_size = QLabel('-')
         self.shown_size = QLabel('-')
         image_box = form_box('Image', [('camera:', self.camera_size),
@@ -131,7 +186,7 @@ class MainWindow(QMainWindow):
         side_panel = QWidget()
         side_panel.setFixedWidth(260)
         side_layout = QVBoxLayout(side_panel)
-        for box in (view_box, detection_box, board_box, image_box, topics_box):
+        for box in (view_box, detection_box, views_box, image_box, topics_box):
             side_layout.addWidget(box)
         side_layout.addStretch(1)
 
@@ -170,19 +225,27 @@ class MainWindow(QMainWindow):
         elif not live:
             self.show_message(f'waiting for {self.node.target} (previews and detections)')
 
-        self.sync_gamma(snap.parameters.get('gamma'))
+        for name, slider in self.sliders.items():
+            self.sync_slider(name, slider, snap.parameters.get(name))
         for name, box in self.flag_boxes.items():
             self.sync_checkbox(name, box, snap.parameters.get(name))
+        self.update_histogram(snap)
         self.update_labels(snap, live)
 
     def show_pair(self, frame, detection, message=None):
         if frame is self._shown_frame and detection is self._shown_detection:
             return
-        corners, corners_width = None, None
+        corners, corners_width, status = None, None, None
         if detection is not None:
             corners, corners_width = detection_corners(detection), detection.image_width
-            message = message or (None if detection.found else 'no board detected')
-        self.video.set_frame(frame.image, corners, message, corners_width)
+            now = time.monotonic()
+            if detection.kept:
+                self._kept_highlight = (f'kept #{detection.kept_views}', now + KEPT_HIGHLIGHT_S)
+            kept_label = None
+            if self._kept_highlight is not None and now < self._kept_highlight[1]:
+                kept_label = self._kept_highlight[0]
+            status = status_lines(detection, kept_label)
+        self.video.set_frame(frame.image, corners, message, corners_width, status)
         self._shown_frame, self._shown_detection, self._shown_message = frame, detection, message
 
     def show_message(self, message):
@@ -219,30 +282,25 @@ class MainWindow(QMainWindow):
         box.setChecked(value)
         box.blockSignals(False)
 
-    def on_gamma_slider(self, position):
-        self.gamma_value.setText(f'{slider_to_gamma(position):.2f}')
-        self._send_timer.start()  # restarts while the slider keeps moving
+    def sync_slider(self, name, slider, value):
+        """Show the calibration node's value unless the user is changing it."""
+        if value is None:
+            slider.show_remote(None)
+        elif not slider.busy() and self.confirmed(name, value):
+            slider.show_remote(value)
 
-    def send_gamma(self):
-        self.send_parameter('gamma', slider_to_gamma(self.gamma_slider.value()))
-
-    def sync_gamma(self, gamma):
-        """Show the calibration node's gamma unless the user is changing it."""
-        if gamma is None:
-            self.gamma_slider.setEnabled(False)
-            self.gamma_value.setText('-')
-            return
-        self.gamma_slider.setEnabled(True)
-        if self.gamma_slider.isSliderDown() or self._send_timer.isActive():
-            return
-        if not self.confirmed('gamma', gamma):
-            return
-        position = gamma_to_slider(gamma)
-        if position != self.gamma_slider.value():
-            self.gamma_slider.blockSignals(True)  # not a user change: do not send it back
-            self.gamma_slider.setValue(position)
-            self.gamma_slider.blockSignals(False)
-        self.gamma_value.setText(f'{gamma:.2f}')
+    def update_histogram(self, snap):
+        # The curve follows a slider while it is moved, otherwise the node's value.
+        curve = []
+        for name in ('contrast_strength', 'contrast_midpoint'):
+            slider = self.sliders[name]
+            curve.append(slider.value() if slider.busy() else snap.parameters.get(name))
+        if None not in curve:
+            self.histogram.set_curve(*curve)
+        if snap.histogram is not None and snap.histogram is not self._shown_histogram:
+            self.histogram.set_histograms(snap.histogram.before_contrast,
+                                          snap.histogram.after_contrast)
+            self._shown_histogram = snap.histogram
 
     # ------------------------------------------------------------------ labels
 
@@ -256,15 +314,15 @@ class MainWindow(QMainWindow):
             source = 'preview' if frame.encoding == 'preview' else f'raw, {frame.encoding}'
             self.shown_size.setText(f'{width} x {height} ({source})')
 
+        cols, rows = snap.parameters.get('board_cols'), snap.parameters.get('board_rows')
+        self.board_size.setText('-' if None in (cols, rows) else f'{cols} x {rows}')
         if live:
-            self.board_found.setText('yes' if detection.found else 'no')
-            self.board_grid.setText(
-                f'{detection.cols} x {detection.rows}' if detection.found else '-')
+            # The node's current count: from the newest detection, not the one on screen.
+            self.kept_views.setText(str(detection.kept_views))
             detection_text = (f'detection {snap.detection_fps:.1f} fps, '
                               f'{detection.detection_time_ms:.0f} ms')
         else:
-            self.board_found.setText('-')
-            self.board_grid.setText('-')
+            self.kept_views.setText('-')
             detection_text = 'detection: none received'
         if self.raw_toggle.isChecked():
             image_text = f'raw camera {snap.raw_fps:.1f} fps'

@@ -30,6 +30,10 @@ def generate_launch_description():
                 [FindPackageShare('smart_calibration'), 'config', 'ircam_wide.yaml']),
             description='calibration_node parameters: board size, preprocessing, detector '
                         'flags (see config/ircam_wide.yaml).'),
-        include('calibration.launch.py', ['image_topic', 'params_file']),
+        DeclareLaunchArgument(
+            'log_level',
+            default_value='info',
+            description='calibration_node log level; debug logs a line per frame.'),
+        include('calibration.launch.py', ['image_topic', 'params_file', 'log_level']),
         include('gui.launch.py', ['image_topic']),
     ])

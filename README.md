@@ -85,6 +85,7 @@ Launch arguments:
 |---|---|---|
 | `calibration.launch.py`, `calibration_with_gui.launch.py` | `image_topic` | `/ircam_wide/decoded` |
 | | `params_file` | `config/ircam_wide.yaml` (installed copy) |
+| | `log_level` (calibration_node; `debug` logs a line per frame) | `info` |
 | `gui.launch.py` | `image_topic` (raw view only) | `/ircam_wide/decoded` |
 | | `calibration_node` | `/calibration_node` |
 
@@ -94,13 +95,19 @@ calibration_node's settings live in a parameter file, one per camera / board
 | Parameter | Live | Meaning |
 |---|---|---|
 | `board_cols`, `board_rows` | no | inner corners of the chessboard (squares - 1) |
+| `square_size` | no | side length of one square in metres (measure the printed board); scales the board poses, not the intrinsics |
 | `stretch_low_percentile`, `stretch_high_percentile` | yes | contrast stretch: these intensity percentiles become black / white |
 | `gamma` | yes | applied after the stretch; > 1 brightens dark regions, < 1 darkens bright ones |
+| `contrast_strength`, `contrast_midpoint` | yes | S-shaped contrast curve after gamma: grey levels below the midpoint (0-1) get darker, above it lighter; strength = steepness (0: off). Best midpoint: between the dark and light squares' histogram peaks (GUI plot) |
 | `detector_normalize`, `detector_exhaustive`, `detector_accuracy` | yes | findChessboardCornersSB flags (see explore.md) |
+| `max_board_speed` | yes | detections are only kept while the board moves at most this many pixels per second (mean corner movement since the previous detection, at most 0.5 s earlier), against motion blur. The debug log (launch argument `log_level:=debug`) shows the speed per frame |
+| `max_grid_irregularity` | yes | detections with a misplaced corner are not kept: largest deviation of a corner from the smooth grid of its neighbours (third difference over four neighbouring corners along rows and columns), in square sizes. Lens distortion and perspective barely affect it; correct boards stay below ~0.1 (~0.2 for very small squares). Shown in the debug log |
+| `min_view_distance` | yes | a still detection is only kept if its board outline (the four outermost corners, the green box in the GUI) differs from every kept view by at least this much: mean corner distance as a fraction of the image diagonal. Shown in the debug log too |
 | `image_qos` | no | `auto` matches the camera publisher's reliability (best effort loses many large images; reliable cannot connect to a best-effort publisher), or `reliable` / `best_effort` |
 | `preview_max_width`, `preview_jpeg_quality` | no | preview images sent to the GUI |
 
-Live parameters can be changed while running, from the GUI (gamma slider, detector checkboxes)
+Live parameters can be changed while running, from the GUI (gamma / contrast / midpoint sliders
+with a histogram of the tone mapping, detector checkboxes)
 or with `ros2 param set /calibration_node <name> <value>`; the others are rejected while running.
 Changes made while running are not written back to the file. Since the installed copy is used,
 rebuild after editing a file under `config/`, or pass your own file with `params_file:=<path>`.
@@ -119,8 +126,11 @@ What it does so far:
   contrast), detects the chessboard with `findChessboardCornersSB` in a worker thread (always on
   the newest frame; frames arriving while it is busy are dropped), and publishes a
   `smart_calibration_interfaces/BoardDetection` per processed frame on `~/detection`.
-  Run with `--log-level calibration_node:=debug` for a line per frame.
+  Launch with `log_level:=debug` (or `ros2 run ... --ros-args --log-level debug`) for a line
+  per frame.
 - **calibration_gui** (PySide6) shows the camera image with the detected corners drawn on top,
-  board / image info and camera / detection rates. It shows the frame each detection was computed
+  a status box in its top left corner (board found; motion, corner and new-view checks with
+  their values, green = passed, red = failed, amber = too close to a kept view; "kept #N" when a
+  view is kept), the number of kept views, image info and camera / detection rates. It shows the frame each detection was computed
   on (matched by timestamp), so the overlay sits exactly on the board and the video lags by one
   detection. Without detections for 1 s it shows the live image without overlay.
