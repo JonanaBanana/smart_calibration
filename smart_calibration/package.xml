@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>smart_calibration</name>
+  <version>0.0.0</version>
+  <description>Tunable monocular camera calibration (pinhole/plumb_bob and fisheye/equidistant) for ROS 2</description>
+  <maintainer email="example@email.com">JonanaBanana</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>smart_calibration_interfaces</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <!-- OpenCV and numpy are intentionally not declared here: they come from the package-local
+       venv (requirements.txt), not from rosdep / apt. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

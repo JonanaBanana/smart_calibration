@@ -1,0 +1,28 @@
+# calibration_node settings tuned for the ircam_wide camera and its 6x7 board.
+# Copy this file per camera / board and select it with: params_file:=<path>
+#
+# Live parameters (gamma, stretch_*, detector_*) can also be changed while running, from the GUI
+# or with `ros2 param set /calibration_node <name> <value>`; the rest is read at startup.
+calibration_node:
+  ros__parameters:
+    # Chessboard: number of INNER corners (squares - 1) along each axis.
+    board_cols: 6
+    board_rows: 7
+
+    # Preprocessing: contrast stretch between these intensity percentiles, then gamma.
+    stretch_low_percentile: 0.5
+    stretch_high_percentile: 99.5
+    gamma: 0.45
+
+    # findChessboardCornersSB flags. exhaustive + accuracy gave ~80-90 % detection with this
+    # camera (accuracy also lowers the corner error, at ~4x the detection time).
+    detector_normalize: false
+    detector_exhaustive: true
+    detector_accuracy: false
+
+    # Camera subscription: auto matches the camera publisher's reliability.
+    image_qos: auto
+
+    # Preview sent to the GUI.
+    preview_max_width: 1280
+    preview_jpeg_quality: 80

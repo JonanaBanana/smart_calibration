@@ -1,0 +1,11 @@
+# Python venv (see README.md)
+.venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+*.egg-info/
+
+# IDE / tooling config (keep locally, not in repo)
+.vscode/
+.claude/

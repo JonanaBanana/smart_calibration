@@ -1,0 +1,23 @@
+# Python dependencies for smart_calibration, installed into a package-local, isolated venv
+# (no --system-site-packages), like AerialTN_GeoMap:
+#
+#   cd ~/ros2_ws/src/smart_calibration
+#   python3 -m venv .venv --prompt smart_calibration
+#   source .venv/bin/activate && pip install -r requirements.txt
+#   deactivate
+#
+# ROS Python packages (rclpy, sensor_msgs, cv_bridge, ...) are NOT installed here: they come
+# from sourcing /opt/ros/humble/setup.bash (PYTHONPATH). Verified working with this venv.
+#
+# Version rationale (see explore.md §5 and §6):
+# - OpenCV 4.11 is the newest wheel that still supports numpy 1.x. 4.12+ requires numpy>=2,
+#   which breaks Humble's cv_bridge (compiled against the numpy 1.x C API).
+# - numpy 1.26.4: last numpy 1.x; the venv is isolated, so it must be pinned explicitly.
+# - Headless OpenCV: chessboard only (no ArUco/contrib modules), and all visualization is done in
+#   Qt. The non-headless opencv-python wheel bundles its own Qt, which conflicts with PySide6.
+# - PySide6 6.11.2: GUI node (Qt 6). Needs glibc >= 2.34 (Ubuntu 22.04 has 2.35) and the
+#   libxcb-cursor0 apt package. 6.12.0 was skipped as too new (Oct 2026).
+
+opencv-python-headless==4.11.0.86
+numpy==1.26.4
+PySide6==6.11.2
