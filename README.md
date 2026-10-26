@@ -10,10 +10,34 @@ Background research and design notes are in [explore.md](explore.md).
 smart_calibration/                 repository root
 ├── smart_calibration/             ament_python package: calibration node (and later the GUI)
 ├── smart_calibration_interfaces/  ament_cmake package: message / service definitions
+├── utility/                       pattern generator (from OpenCV), synthetic test images
+├── dataset/                       generated test images (not in git)
 ├── .venv/                         Python venv shared by the nodes (not in git)
 ├── requirements.txt
+├── THIRD_PARTY_NOTICES.md         files from other projects and their licences
 └── explore.md                     research and design notes
 ```
+
+## Synthetic test images
+
+`utility/synthetic_dataset.py` renders test images with exact ground truth: a simulated
+1280x720 camera (90 deg, pinhole + plumb_bob or fisheye + equidistant, `--model`) sees the plain
+6x7 chessboard (completely visible) and an oversized radon checkerboard with markers in random
+poses, with perspective, lens distortion, blur, noise and vignetting. `utility/evaluate_dataset.py`
+runs the package's preprocessing and detection on them and reports detection rates, corner errors,
+marker origins, false detections, and how well a calibration from the detections recovers the
+true camera. With the venv active, from the repository root:
+
+```bash
+python utility/synthetic_dataset.py --output dataset/synthetic   # 210 images, ~75 s, ~90 MB
+python utility/evaluate_dataset.py dataset/synthetic --exhaustive
+# also draw true (cyan crosses) and detected corners (green / yellow / red by error) into
+# images named by their worst corner error, with a zoomed inset of that corner:
+python utility/evaluate_dataset.py dataset/synthetic --exhaustive --visualize dataset/synthetic/visualized
+```
+
+Synthetic images are cleaner than a real camera's: use them to check that the code is correct, not
+to tune thresholds or preprocessing for a real camera.
 
 ## Installation
 
@@ -94,15 +118,20 @@ calibration_node's settings live in a parameter file, one per camera / board
 
 | Parameter | Live | Meaning |
 |---|---|---|
-| `board_cols`, `board_rows` | no | inner corners of the chessboard (squares - 1) |
+| `board_mode` | no | `chessboard`: plain chessboard, completely visible. `oversized_marker`: radon checkerboard larger than the camera's view with three marker dots in an L near its middle (exactly one of them a black dot in a white cell: the origin); every frame may show a different part of it (at least 5 x 5 corners, markers visible), corners get board coordinates relative to the origin. Generate it with OpenCV's `gen_pattern.py -T radon_checkerboard -m ...` |
+| `board_cols`, `board_rows` | no | inner corners of the chessboard (squares - 1), `chessboard` mode only |
 | `square_size` | no | side length of one square in metres (measure the printed board); scales the board poses, not the intrinsics |
 | `stretch_low_percentile`, `stretch_high_percentile` | yes | contrast stretch: these intensity percentiles become black / white |
 | `gamma` | yes | applied after the stretch; > 1 brightens dark regions, < 1 darkens bright ones |
 | `contrast_strength`, `contrast_midpoint` | yes | S-shaped contrast curve after gamma: grey levels below the midpoint (0-1) get darker, above it lighter; strength = steepness (0: off). Best midpoint: between the dark and light squares' histogram peaks (GUI plot) |
 | `detector_normalize`, `detector_exhaustive`, `detector_accuracy` | yes | findChessboardCornersSB flags (see explore.md) |
 | `max_board_speed` | yes | detections are only kept while the board moves at most this many pixels per second (mean corner movement since the previous detection, at most 0.5 s earlier), against motion blur. The debug log (launch argument `log_level:=debug`) shows the speed per frame |
-| `max_grid_irregularity` | yes | detections with a misplaced corner are not kept: largest deviation of a corner from the smooth grid of its neighbours (third difference over four neighbouring corners along rows and columns), in square sizes. Lens distortion and perspective barely affect it; correct boards stay below ~0.1 (~0.2 for very small squares). Shown in the debug log |
-| `min_view_distance` | yes | a still detection is only kept if its board outline (the four outermost corners, the green box in the GUI) differs from every kept view by at least this much: mean corner distance as a fraction of the image diagonal. Shown in the debug log too |
+| `max_corner_residual` | yes | frames with a misplaced corner or a deformed region are not kept: for each corner, its distance from where a quadratic surface through its neighbours (within 3 squares, the corner left out) puts it, in square sizes. Works the same at the edges of the grid; correct corners stay below ~0.06 on synthetic views. Any corner above the limit discards the frame. Shown in the debug log and the GUI's status box |
+| `border_margin_px` | yes | corners outside the image or closer than this to its border are not used (the detector may predict or mismatch corners there); the rest of the frame is. Shown as gaps in the GUI overlay |
+| `min_view_distance` | yes | a still detection is only kept if its board outline (the four outermost corners, the green box in the GUI) differs from every kept view by at least this much: mean corner distance in board sizes (the mean side length of the two outlines), so a board moved by a quarter of its size counts the same near the camera as far from it. Shown in the debug log and the GUI's status box |
+| `min_calibration_views`, `calibrate_every_views` | yes | background calibration from the kept views: first once this many views are kept, then every this many new views (in its own thread; ~20 ms with 5 views, ~0.5 s with 50) |
+| `free_k3_after_views` | yes | distortion coefficient k3 stays 0 while fewer views than this are used: with few views it makes the distortion run wild where no corners are |
+| `uncertainty_scale` | yes | multiplies the calibration's estimated uncertainties: they assume independent corner errors and come out ~1.5-2.5x too small on synthetic data (`utility/uncertainty_prototype.py`) |
 | `image_qos` | no | `auto` matches the camera publisher's reliability (best effort loses many large images; reliable cannot connect to a best-effort publisher), or `reliable` / `best_effort` |
 | `preview_max_width`, `preview_jpeg_quality` | no | preview images sent to the GUI |
 
@@ -128,9 +157,19 @@ What it does so far:
   `smart_calibration_interfaces/BoardDetection` per processed frame on `~/detection`.
   Launch with `log_level:=debug` (or `ros2 run ... --ros-args --log-level debug`) for a line
   per frame.
+- Every few kept views it **calibrates in the background** (pinhole / plumb_bob) and publishes a
+  `smart_calibration_interfaces/CalibrationState` on `~/calibration`: the camera matrix and
+  distortion, the reprojection error, the uncertainty of the estimate (largest over the image, in
+  total and per parameter group: focal length, principal point, distortion), an uncertainty map
+  over the image, the board tilt of every view, and hints about missing view types (e.g. no
+  tilted boards). The uncertainty assumes independent corner errors: it shows well *where* the
+  calibration is weak, but a small value alone does not prove a good calibration (see
+  [calibration.py](smart_calibration/smart_calibration/calibration.py)).
 - **calibration_gui** (PySide6) shows the camera image with the detected corners drawn on top,
   a status box in its top left corner (board found; motion, corner and new-view checks with
   their values, green = passed, red = failed, amber = too close to a kept view; "kept #N" when a
-  view is kept), the number of kept views, image info and camera / detection rates. It shows the frame each detection was computed
+  view is kept), the number of kept views, the newest background calibration with its
+  uncertainty and hints, an uncertainty map over the video (switchable; green below 0.25 px, red
+  from 2 px: bring the board to the red regions), image info and camera / detection rates. It shows the frame each detection was computed
   on (matched by timestamp), so the overlay sits exactly on the board and the video lags by one
   detection. Without detections for 1 s it shows the live image without overlay.

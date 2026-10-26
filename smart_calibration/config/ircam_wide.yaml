@@ -5,7 +5,11 @@
 # or with `ros2 param set /calibration_node <name> <value>`; the rest is read at startup.
 calibration_node:
   ros__parameters:
-    # Chessboard: number of INNER corners (squares - 1) along each axis.
+    # Board type (startup only): chessboard (plain, completely visible, size below) or
+    # oversized_marker (radon checkerboard larger than the view, with three marker dots in an L
+    # near its middle that has exactly one white marker cell; any visible part of 5x5+ corners).
+    board_mode: chessboard
+    # Chessboard: number of INNER corners (squares - 1) along each axis (chessboard mode only).
     board_cols: 6
     board_rows: 7
     # Side length of one square in metres. Placeholder: measure the printed board.
@@ -28,13 +32,26 @@ calibration_node:
     # View selection: only keep detections while the board moves at most this many pixels per
     # second (mean corner movement since the previous detection), against motion blur.
     max_board_speed: 50.0
-    # ... and only if no corner is misplaced: largest deviation of a corner from the smooth grid of
-    # its neighbours (third difference along rows and columns), in square sizes. Correct boards
-    # stay below ~0.1 (up to ~0.2 for very small squares); a corner off by 0.15 squares gives 0.35+.
-    max_grid_irregularity: 0.3
+    # ... and only if no corner is misplaced: distance (in square sizes) of each corner from where
+    # a quadratic surface through its neighbours (within 3 squares) puts it. Correct corners stay
+    # below ~0.06 on synthetic views; any corner above the limit discards the whole frame.
+    max_corner_residual: 0.1
+    # Corners closer than this to the image border (or outside it) are not used (the detector
+    # may predict or mismatch corners there); the rest of the frame is.
+    border_margin_px: 10.0
     # ... and only if the board outline (four outermost corners) differs from every kept view by
-    # at least this much: mean corner distance as a fraction of the image diagonal.
-    min_view_distance: 0.03
+    # at least this much: mean corner distance in board sizes (mean side length of the outline),
+    # so the same movement counts the same near the camera and far from it.
+    min_view_distance: 0.1
+
+    # Background calibration from the kept views: first after min_calibration_views views, then
+    # every calibrate_every_views new views. k3 stays 0 below free_k3_after_views views (with few
+    # views it makes the distortion run wild where no corners are). The estimated uncertainty is
+    # multiplied by uncertainty_scale (it comes out ~1.5-2.5x too small on synthetic data).
+    min_calibration_views: 5
+    calibrate_every_views: 3
+    free_k3_after_views: 20
+    uncertainty_scale: 2.0
 
     # Camera subscription: auto matches the camera publisher's reliability.
     image_qos: auto

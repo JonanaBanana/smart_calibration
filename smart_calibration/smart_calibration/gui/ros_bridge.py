@@ -1,8 +1,8 @@
 """
 ROS side of the calibration GUI, used from the Qt thread through thread-safe methods.
 
-Receives the calibration node's previews and detections (and, on request, the raw camera
-stream), and reads / sets the calibration node's live parameters.
+Receives the calibration node's previews, detections and calibrations (and, on request, the raw
+camera stream), and reads / sets the calibration node's live parameters.
 """
 
 import collections
@@ -16,13 +16,14 @@ from rcl_interfaces.msg import ParameterDescriptor, ParameterEvent
 from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from rclpy.parameter import Parameter, parameter_value_to_python
-from rclpy.qos import qos_profile_parameter_events, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy, qos_profile_parameter_events, QoSProfile, ReliabilityPolicy)
 from sensor_msgs.msg import CompressedImage, Image
 
 from smart_calibration.image_preprocessing import (
     FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS, to_mono8)
 from smart_calibration.qos import image_qos
-from smart_calibration_interfaces.msg import BoardDetection, ToneHistogram
+from smart_calibration_interfaces.msg import BoardDetection, CalibrationState, ToneHistogram
 
 # Buffers for pairing images with detections by timestamp; they must cover the detection
 # latency (a detection arrives after its preview / raw frame).
@@ -42,6 +43,7 @@ Snapshot = collections.namedtuple('Snapshot', [
     'newest_raw',         # newest raw camera Frame, or None
     'parameters',         # {name: value} of the calibration node, as far as known
     'histogram',          # newest ToneHistogram, or None
+    'calibration',        # newest CalibrationState, or None
     'preview_fps',
     'detection_fps',
     'raw_fps',
@@ -129,6 +131,11 @@ class GuiNode(Node):
         self.histogram_sub = self.create_subscription(
             ToneHistogram, f'{self.target}/histogram', self.histogram_callback,
             QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
+        # Transient local like the publisher: the newest calibration even if it came earlier.
+        self._calibration = None
+        self.calibration_sub = self.create_subscription(
+            CalibrationState, f'{self.target}/calibration', self.calibration_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
         # Raw camera stream: subscribed only while the raw view is switched on.
         self._raw_wanted = False
@@ -172,6 +179,10 @@ class GuiNode(Node):
     def histogram_callback(self, msg):
         with self._lock:
             self._histogram = msg
+
+    def calibration_callback(self, msg):
+        with self._lock:
+            self._calibration = msg
 
     def raw_callback(self, msg):
         try:
@@ -222,7 +233,8 @@ class GuiNode(Node):
             return Snapshot(
                 self._newest_detection, age, preview, preview_detection, raw_frame,
                 raw_detection, self._raw_frames[-1] if self._raw_frames else None,
-                dict(self.parameters), self._histogram, self._preview_rate.rate(now),
+                dict(self.parameters), self._histogram, self._calibration,
+                self._preview_rate.rate(now),
                 self._detection_rate.rate(now), self._raw_rate.rate(now))
 
     # ------------------------------------------------------------------ parameters

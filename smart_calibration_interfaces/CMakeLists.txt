@@ -19,6 +19,7 @@ find_package(geometry_msgs REQUIRED)
 # List every interface explicitly (e.g. "msg/BoardDetection.msg", "srv/Calibrate.srv").
 set(interface_files
   "msg/BoardDetection.msg"
+  "msg/CalibrationState.msg"
   "msg/ToneHistogram.msg"
 )
 

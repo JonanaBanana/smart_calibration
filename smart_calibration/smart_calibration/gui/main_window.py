@@ -40,8 +40,8 @@ DETECTOR_FLAGS = (
     ('detector_accuracy', 'accuracy (~4x slower)',
      'Upsamples the image 2x inside the detector: more accurate corners, ~4x detection time.'),
 )
-REMOTE_PARAMETERS = ('gamma', 'contrast_strength', 'contrast_midpoint', 'board_cols',
-                     'board_rows') + tuple(name for name, _, _ in DETECTOR_FLAGS)
+REMOTE_PARAMETERS = ('gamma', 'contrast_strength', 'contrast_midpoint', 'board_mode',
+                     'board_cols', 'board_rows') + tuple(name for name, _, _ in DETECTOR_FLAGS)
 
 
 def gamma_to_slider(gamma):
@@ -81,8 +81,7 @@ def status_lines(detection, kept_label=None):
             (label, '-', '', 'unknown') for label in ('motion', 'corners', 'new view')]
     lines = [('board', 'found', '', 'pass'),
              check_line('motion', detection.speed_check, f'{detection.board_speed:.0f} px/s'),
-             check_line('corners', detection.irregularity_check,
-                        f'{detection.grid_irregularity:.2f}')]
+             check_line('corners', detection.residual_check, f'{detection.corner_residual:.2f}')]
     if kept_label:
         lines.append(('new view', kept_label, '', 'kept'))
     else:
@@ -91,6 +90,30 @@ def status_lines(detection, kept_label=None):
                     else f'{detection.view_distance:.3f}')
         lines.append(check_line('new view', detection.distance_check, distance, 'warn'))
     return lines
+
+
+def uncertainty_map(calibration):
+    """Return the (rows, cols) uncertainty map of a CalibrationState, px."""
+    return np.asarray(calibration.uncertainty_map, np.float32).reshape(
+        calibration.map_rows, calibration.map_cols)
+
+
+def calibration_texts(calibration):
+    """Texts {label name: text} of the Calibration box for a CalibrationState (or None)."""
+    if calibration is None:
+        return dict(views='-', rms='-', focal='-', centre='-', uncertainty='-', groups='',
+                    hints='')
+    K, std = calibration.camera_matrix, calibration.std_deviations
+    return dict(
+        views=f'{calibration.views}' + (' (k3 fixed)' if calibration.k3_fixed else ''),
+        rms=f'{calibration.rms:.3f} px',
+        focal=f'{K[0]:.1f} / {K[4]:.1f}  ±{max(std[0], std[1]):.1f}',
+        centre=f'{K[2]:.1f} / {K[5]:.1f}  ±{max(std[2], std[3]):.1f}',
+        uncertainty=f'{calibration.uncertainty:.2f} px',
+        groups=(f'focal {calibration.focal_uncertainty:.2f}, centre '
+                f'{calibration.centre_uncertainty:.2f}, distortion '
+                f'{calibration.distortion_uncertainty:.2f}'),
+        hints='\n'.join(calibration.hints))
 
 
 def form_box(title, rows):
@@ -126,8 +149,18 @@ class MainWindow(QMainWindow):
         # switch it on.
         self.raw_toggle.setFocusPolicy(Qt.NoFocus)
         self.raw_toggle.toggled.connect(self.node.set_raw_enabled)
+        self.map_toggle = QCheckBox('uncertainty map')
+        self.map_toggle.setToolTip(
+            'Colour the image by how uncertain the newest background calibration is there: how '
+            'far a point could be projected off, in px (green: small, red: large). Bring the '
+            'board to the red regions.')
+        self.map_toggle.setFocusPolicy(Qt.NoFocus)
+        self.map_toggle.setChecked(True)
+        self._shown_map = None  # (CalibrationState, toggle state) shown
         view_box = QGroupBox('View')
-        QVBoxLayout(view_box).addWidget(self.raw_toggle)
+        view_layout = QVBoxLayout(view_box)
+        view_layout.addWidget(self.raw_toggle)
+        view_layout.addWidget(self.map_toggle)
 
         # Detection: tone mapping sliders, histogram, detector flags
         self.sliders = {
@@ -167,10 +200,38 @@ class MainWindow(QMainWindow):
 
         # Info (per-frame detection results are in the video's status box)
         self.board_size = QLabel('-')
-        self.board_size.setToolTip('Inner corners the calibration node looks for (cols x rows).')
+        self.board_size.setToolTip('The board the calibration node looks for: inner corners '
+                                   '(cols x rows) of a plain chessboard, or an oversized board '
+                                   'with markers (any visible part of it).')
         self.kept_views = QLabel('-')
         views_box = form_box('Calibration views', [('board:', self.board_size),
                                                    ('kept:', self.kept_views)])
+        # Background calibration
+        self.calibration_labels = {name: QLabel('-') for name in (
+            'views', 'rms', 'focal', 'centre', 'uncertainty', 'groups', 'hints')}
+        tooltips = dict(
+            views='Views used by the newest background calibration. k3 stays 0 until '
+                  'free_k3_after_views views.',
+            rms='Reprojection error over all corners.',
+            focal='fx / fy in px, ± the larger standard deviation (times uncertainty_scale).',
+            centre='Principal point cx / cy in px, ± the larger standard deviation.',
+            uncertainty='Largest value of the uncertainty map: how far a point could be projected '
+                        'off, px (times uncertainty_scale). It does not see systematic errors, so '
+                        'a small value alone does not prove a good calibration.',
+            groups='Largest uncertainty from each parameter group alone, px.',
+            hints='View types that are missing; new views fix them.')
+        for name, label in self.calibration_labels.items():
+            label.setToolTip(tooltips[name])
+        for name in ('groups', 'hints'):
+            self.calibration_labels[name].setWordWrap(True)
+        self.calibration_labels['hints'].setStyleSheet('color: rgb(255, 200, 60)')
+        labels = self.calibration_labels
+        calibration_box = form_box('Calibration', [
+            ('views:', labels['views']), ('rms:', labels['rms']), ('focal:', labels['focal']),
+            ('centre:', labels['centre']), ('uncertainty:', labels['uncertainty'])])
+        calibration_box.layout().addRow(labels['groups'])
+        calibration_box.layout().addRow(labels['hints'])
+
         self.camera_size = QLabel('-')
         self.shown_size = QLabel('-')
         image_box = form_box('Image', [('camera:', self.camera_size),
@@ -186,7 +247,8 @@ class MainWindow(QMainWindow):
         side_panel = QWidget()
         side_panel.setFixedWidth(260)
         side_layout = QVBoxLayout(side_panel)
-        for box in (view_box, detection_box, views_box, image_box, topics_box):
+        for box in (view_box, detection_box, views_box, calibration_box, image_box,
+                    topics_box):
             side_layout.addWidget(box)
         side_layout.addStretch(1)
 
@@ -230,14 +292,17 @@ class MainWindow(QMainWindow):
         for name, box in self.flag_boxes.items():
             self.sync_checkbox(name, box, snap.parameters.get(name))
         self.update_histogram(snap)
+        self.update_calibration(snap.calibration)
         self.update_labels(snap, live)
 
     def show_pair(self, frame, detection, message=None):
         if frame is self._shown_frame and detection is self._shown_detection:
             return
-        corners, corners_width, status = None, None, None
+        corners, corners_width, status, origin = None, None, None, None
         if detection is not None:
             corners, corners_width = detection_corners(detection), detection.image_width
+            if detection.found:
+                origin = (detection.origin_row, detection.origin_col)
             now = time.monotonic()
             if detection.kept:
                 self._kept_highlight = (f'kept #{detection.kept_views}', now + KEPT_HIGHLIGHT_S)
@@ -245,7 +310,7 @@ class MainWindow(QMainWindow):
             if self._kept_highlight is not None and now < self._kept_highlight[1]:
                 kept_label = self._kept_highlight[0]
             status = status_lines(detection, kept_label)
-        self.video.set_frame(frame.image, corners, message, corners_width, status)
+        self.video.set_frame(frame.image, corners, message, corners_width, status, origin)
         self._shown_frame, self._shown_detection, self._shown_message = frame, detection, message
 
     def show_message(self, message):
@@ -302,6 +367,21 @@ class MainWindow(QMainWindow):
                                           snap.histogram.after_contrast)
             self._shown_histogram = snap.histogram
 
+    # ------------------------------------------------------------------ calibration
+
+    def update_calibration(self, calibration):
+        shown = (calibration, self.map_toggle.isChecked())
+        if self._shown_map is not None and all(
+                a is b for a, b in zip(shown, self._shown_map)):
+            return
+        self._shown_map = shown
+        self.video.set_uncertainty_map(
+            uncertainty_map(calibration)
+            if calibration is not None and self.map_toggle.isChecked() else None)
+        for name, text in calibration_texts(calibration).items():
+            self.calibration_labels[name].setText(text)
+        self.calibration_labels['hints'].setVisible(bool(calibration and calibration.hints))
+
     # ------------------------------------------------------------------ labels
 
     def update_labels(self, snap, live):
@@ -314,8 +394,12 @@ class MainWindow(QMainWindow):
             source = 'preview' if frame.encoding == 'preview' else f'raw, {frame.encoding}'
             self.shown_size.setText(f'{width} x {height} ({source})')
 
+        mode = snap.parameters.get('board_mode')
         cols, rows = snap.parameters.get('board_cols'), snap.parameters.get('board_rows')
-        self.board_size.setText('-' if None in (cols, rows) else f'{cols} x {rows}')
+        if mode == 'oversized_marker':
+            self.board_size.setText('oversized, markers')
+        else:
+            self.board_size.setText('-' if None in (cols, rows) else f'{cols} x {rows}')
         if live:
             # The node's current count: from the newest detection, not the one on screen.
             self.kept_views.setText(str(detection.kept_views))

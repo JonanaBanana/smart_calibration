@@ -5,6 +5,10 @@
 __pycache__/
 *.pyc
 *.egg-info/
+# Generated test images (regenerate with utility/synthetic_dataset.py)
+dataset/
+
+*.svg
 
 # IDE / tooling config (keep locally, not in repo)
 .vscode/
