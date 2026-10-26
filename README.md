@@ -132,6 +132,9 @@ calibration_node's settings live in a parameter file, one per camera / board
 | `min_calibration_views`, `calibrate_every_views` | yes | background calibration from the kept views: first once this many views are kept, then every this many new views (in its own thread; ~20 ms with 5 views, ~0.5 s with 50) |
 | `free_k3_after_views` | yes | distortion coefficient k3 stays 0 while fewer views than this are used: with few views it makes the distortion run wild where no corners are |
 | `uncertainty_scale` | yes | multiplies the calibration's estimated uncertainties: they assume independent corner errors and come out ~1.5-2.5x too small on synthetic data (`utility/uncertainty_prototype.py`) |
+| `outlier_z_limit`, `outlier_min_views` | yes | final calibration: a view is an outlier candidate if its leave-one-out error (how badly the other views predict it) has a robust z-score above the limit among all views; no outlier check with fewer than `outlier_min_views` views (unreliable with few) |
+| `outlier_max_uncertainty_increase`, `outlier_max_fraction` | yes | a candidate is only removed if that raises the mean uncertainty over the image by at most this factor (otherwise no other view covers its region: it is kept as a suspect, add views there), and at most this fraction of the views is removed (`utility/outlier_prototype.py`) |
+| `output_file` | yes | where Accept saves the calibration, on the machine running the node: OpenCV YAML (`cv2.FileStorage`) with `M` (3x3), `D` (5x1: k1, k2, p1, p2, k3), `reprojection_error`, `width`, `height`, `distortion_model`, `calibration_time`. strftime placeholders (`%Y`, `%m`, ...) and `~` work; default `~/.ros/smart_calibration/calibration_%Y-%m-%d_%H-%M-%S.yaml` |
 | `image_qos` | no | `auto` matches the camera publisher's reliability (best effort loses many large images; reliable cannot connect to a best-effort publisher), or `reliable` / `best_effort` |
 | `preview_max_width`, `preview_jpeg_quality` | no | preview images sent to the GUI |
 
@@ -165,11 +168,34 @@ What it does so far:
   tilted boards). The uncertainty assumes independent corner errors: it shows well *where* the
   calibration is weak, but a small value alone does not prove a good calibration (see
   [calibration.py](smart_calibration/smart_calibration/calibration.py)).
+- **Final calibration** (service `~/finish`, the GUI's Finish button): collection stops, the
+  node calibrates from all views, removes clear outliers one at a time (views the other views
+  predict badly, unless no other view covers their region: those are kept as suspects) and
+  calibrates again. Progress and results are published on `~/final_calibration`; `~/get_view`
+  serves a kept view's thumbnail and corner errors, `~/accept` saves the result to `output_file`,
+  `~/resume` returns to collecting (removed views are dropped). Calling `~/finish` again
+  with view indices in `keep` re-runs it with those views restored.
 - **calibration_gui** (PySide6) shows the camera image with the detected corners drawn on top,
   a status box in its top left corner (board found; motion, corner and new-view checks with
   their values, green = passed, red = failed, amber = too close to a kept view; "kept #N" when a
   view is kept), the number of kept views, the newest background calibration with its
   uncertainty and hints, an uncertainty map over the video (switchable; green below 0.25 px, red
-  from 2 px: bring the board to the red regions), image info and camera / detection rates. It shows the frame each detection was computed
+  from 2 px: bring the board to the red regions), and in the status bar the camera topic and
+  image size, the preview / detection rates and the replies to Finish / Accept / Resume.
+  **undistorted** (View box, once there is a calibration) shows everything undistorted by the
+  current calibration (the background one, or the final result after Finish): the video, the
+  detected corners, the uncertainty map, the view outlines and a selected view's thumbnail and
+  corner errors. The slider sets how much is shown, from only valid pixels (crop) to the whole
+  image (all). Where the estimated distortion turns back on itself (beyond the corners it was
+  fitted to, typically with few views or near the image corners), the view is black outside a
+  dashed amber line: the model is not valid there yet; views near the image edges move it out.
+  While that line lies inside the image, the Calibration box shows a hint, the final result a
+  warning above Accept, and Accept's reply a warning: saved as is, rectifying with it (e.g.
+  `image_proc`, `cv2.undistort`) would mirror the image near its corners.
+  After **Finish** the video shows the outlines of all kept views over the last frame (red
+  dashed: removed, amber: suspect, blue: restored) and the side panel the final calibration: the
+  leave-one-out error of every view against the outlier limit, the flagged views, and Restore /
+  Accept / Resume. Clicking a view (or its dot) shows its thumbnail with its corner errors as
+  arrows (x50). It shows the frame each detection was computed
   on (matched by timestamp), so the overlay sits exactly on the board and the video lags by one
   detection. Without detections for 1 s it shows the live image without overlay.

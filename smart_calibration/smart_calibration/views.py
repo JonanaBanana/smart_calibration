@@ -239,7 +239,7 @@ class Assessment:
 
 
 class ViewCollection:
-    """The views kept for calibration, in memory. Used from the detection worker thread only."""
+    """The views kept for calibration, in memory. Not thread-safe: the caller locks."""
 
     def __init__(self, square_size, reference):
         """Keep views of a board with the given square size (reference: see reference_outline)."""
@@ -256,7 +256,8 @@ class ViewCollection:
         """(width, height) of the kept views, None while there are none."""
         return self.views[0].image_size if self.views else None
 
-    def consider(self, board, image_size, stamp, max_speed, max_residual, min_distance):
+    def consider(self, board, image_size, stamp, max_speed, max_residual, min_distance,
+                 keep=True):
         """
         Run all checks on a detection and keep it as a view if it passes them; return Assessment.
 
@@ -268,7 +269,8 @@ class ViewCollection:
         differs from every kept view by at least min_distance board sizes (nearest_view_distance,
         relative_outline_distance), in the
         same image size as the views so far. All checks are evaluated even if an earlier one
-        fails, so all values can be shown. Only valid corners go into the view.
+        fails, so all values can be shown. Only valid corners go into the view. keep=False:
+        evaluate only (collection stopped), never keep.
         """
         image_size = tuple(image_size)
         previous, self._previous = self._previous, (stamp, board)
@@ -292,7 +294,7 @@ class ViewCollection:
             distance_ok = distance >= min_distance
 
         view = None
-        if speed_ok and residual_ok and distance_ok:
+        if keep and speed_ok and residual_ok and distance_ok:
             view = View(stamp, image_size, image_points(board),
                         object_points(board, self.square_size), speed, outline)
             self.views.append(view)
@@ -302,6 +304,11 @@ class ViewCollection:
         """Distance of a board outline to the nearest kept view's, in board sizes."""
         return min(relative_outline_distance(outline, kept.outline, numbering_may_flip)
                    for kept in self.views)
+
+    def remove(self, indices):
+        """Remove the views at these indices (into views)."""
+        gone = set(indices)
+        self.views = [view for i, view in enumerate(self.views) if i not in gone]
 
     def calibration_input(self):
         """Return (object_points, image_points, image_size) in the form cv2's calibrate takes."""

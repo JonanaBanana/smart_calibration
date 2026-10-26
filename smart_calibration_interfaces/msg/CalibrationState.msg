@@ -52,3 +52,7 @@ float32[] view_tilt_axis
 
 # Missing view types (inform only; new views fix them).
 string[] hints
+
+# The distortion model folds over inside the image: some pixels have no valid ray, and undistorting
+# with it shows the image a second time, mirrored, near the image corners.
+bool distortion_folds

@@ -10,6 +10,8 @@
   <depend>rclpy</depend>
   <depend>rcl_interfaces</depend>
   <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>cv_bridge</depend>
   <depend>smart_calibration_interfaces</depend>
   <exec_depend>launch</exec_depend>

@@ -18,7 +18,7 @@ calibration_node:
     # Preprocessing: contrast stretch between these intensity percentiles, then gamma.
     stretch_low_percentile: 0.5
     stretch_high_percentile: 99.5
-    gamma: 0.5
+    gamma: 0.6
     # S-shaped contrast curve after gamma (0: off); midpoint = grey level (0-1) it keeps.
     contrast_strength: 3.0
     contrast_midpoint: 0.8
@@ -52,6 +52,20 @@ calibration_node:
     calibrate_every_views: 3
     free_k3_after_views: 20
     uncertainty_scale: 2.0
+
+    # Final calibration (the GUI's Finish button): a view is an outlier candidate if its
+    # leave-one-out error (how badly the other views predict it) has a robust z-score above
+    # outlier_z_limit. It is removed only if that raises the mean uncertainty over the image by at
+    # most outlier_max_uncertainty_increase (else no other view covers its region: kept as a
+    # suspect), at most outlier_max_fraction of the views, and only with outlier_min_views views.
+    outlier_z_limit: 6.0
+    outlier_min_views: 15
+    outlier_max_uncertainty_increase: 1.5
+    outlier_max_fraction: 0.1
+    # Accept saves the calibration here (OpenCV YAML: M, D, reprojection_error, width, height,
+    # distortion_model, calibration_time), on the machine running the node. strftime
+    # placeholders (%Y, %m, %d, %H, %M, %S) and ~ work.
+    output_file: ~/calibs/opencv_ircam_wide_intrinsics_%Y-%m-%d_%H-%M-%S.yaml
 
     # Camera subscription: auto matches the camera publisher's reliability.
     image_qos: auto

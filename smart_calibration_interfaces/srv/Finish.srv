@@ -1,0 +1,8 @@
+# Stop collecting views and run the final calibration pass (progress and results: the node's
+# ~/final_calibration topic). Called again after a pass, it re-runs it, e.g. with views restored.
+
+# View indices (0-based) the pass must not remove: views the user restored.
+uint32[] keep
+---
+bool accepted
+string message

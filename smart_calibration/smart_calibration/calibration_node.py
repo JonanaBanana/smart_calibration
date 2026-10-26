@@ -1,3 +1,4 @@
+from datetime import datetime
 import math
 import signal
 import sys
@@ -14,15 +15,20 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import CompressedImage, Image
+from std_msgs.msg import Header
+from std_srvs.srv import Trigger
 
-from smart_calibration.calibration import calibrate_views
+from smart_calibration.calibration import calibrate_views, final_calibration, summary
+from smart_calibration.calibration_file import output_path, write_calibration
 from smart_calibration.detection import BOARD_MODES, detect_board, sb_flags
 from smart_calibration.environment import check_environment
 from smart_calibration.image_preprocessing import FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS
 from smart_calibration.preprocessing import preprocess, preprocess_with_histograms
 from smart_calibration.qos import image_qos
 from smart_calibration.views import Assessment, reference_outline, ViewCollection
-from smart_calibration_interfaces.msg import BoardDetection, CalibrationState, ToneHistogram
+from smart_calibration_interfaces.msg import (
+    BoardDetection, CalibrationState, FinalCalibration, ToneHistogram)
+from smart_calibration_interfaces.srv import Finish, GetView
 
 # Parameters that can be changed while the node runs (e.g. from the GUI's controls).
 LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
@@ -30,7 +36,14 @@ LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
                    'detector_normalize', 'detector_exhaustive', 'detector_accuracy',
                    'max_board_speed', 'max_corner_residual', 'border_margin_px',
                    'min_view_distance', 'calibrate_every_views', 'min_calibration_views',
-                   'free_k3_after_views', 'uncertainty_scale')
+                   'free_k3_after_views', 'uncertainty_scale', 'outlier_z_limit',
+                   'outlier_min_views', 'outlier_max_uncertainty_increase',
+                   'outlier_max_fraction', 'output_file')
+# Thumbnails of the kept views (what the detector saw), for the GUI's final calibration view.
+THUMBNAIL_WIDTH = 320
+THUMBNAIL_JPEG_QUALITY = 80
+# FinalCalibration states in which a final pass result exists.
+RESULT_STATES = (FinalCalibration.STATE_DONE, FinalCalibration.STATE_ACCEPTED)
 
 
 def float_range(low, high, description):
@@ -82,7 +95,60 @@ def calibration_message(result, header):
     state.view_tilt = result.view_tilts[:, 0].astype(np.float32).tolist()
     state.view_tilt_axis = result.view_tilts[:, 1].astype(np.float32).tolist()
     state.hints = list(result.hints)
+    state.distortion_folds = result.distortion_folds
     return state
+
+
+def jpeg(gray, max_width, quality):
+    """JPEG bytes of a gray image, downscaled to at most max_width."""
+    if gray.shape[1] > max_width:
+        scale = max_width / gray.shape[1]
+        gray = cv2.resize(gray, (max_width, round(gray.shape[0] * scale)),
+                          interpolation=cv2.INTER_AREA)
+    return cv2.imencode('.jpg', gray, [cv2.IMWRITE_JPEG_QUALITY, quality])[1].tobytes()
+
+
+def compressed_image(data, header=None):
+    image = CompressedImage()
+    if header is not None:
+        image.header = header
+    image.format = 'mono8; jpeg compressed mono8'  # image_transport's naming
+    image.data = data
+    return image
+
+
+def fill_final(msg, result, image_points, image_size, header):
+    """Fill a FinalCalibration's view outlines and results (result: FinalResult or None)."""
+    msg.total_views = len(image_points)
+    msg.image_width, msg.image_height = image_size
+    for points in image_points:
+        hull = cv2.convexHull(points.reshape(-1, 1, 2).astype(np.float32)).reshape(-1, 2)
+        msg.outline_sizes.append(len(hull))
+        msg.outline_points.extend(hull.ravel().tolist())
+    if result is None:
+        return
+    msg.initial = calibration_message(result.initial, header)
+    msg.final = calibration_message(result.final, header)
+    msg.checked, msg.z_limit, msg.limit = result.checked, result.z_limit, result.initial_limit
+    msg.leave_one_out = result.initial.leave_one_out.astype(np.float32).tolist()
+    msg.removed = [view.index for view in result.removed]
+    msg.removed_z = [view.z for view in result.removed]
+    msg.removed_uncertainty_ratio = [view.uncertainty_ratio for view in result.removed]
+    msg.suspects = [view.index for view in result.suspects]
+    msg.suspects_z = [view.z for view in result.suspects]
+    msg.suspects_uncertainty_ratio = [view.uncertainty_ratio for view in result.suspects]
+    msg.forced = list(result.forced)
+
+
+def without_text(uncertainty_ratio):
+    """Describe what removing a flagged view does to the uncertainty."""
+    if not math.isfinite(uncertainty_ratio):
+        return 'no valid lens model for part of the image'
+    return f'uncertainty x{uncertainty_ratio:.1f}'
+
+
+class Cancelled(Exception):
+    """The final pass was cancelled (collection resumed while it ran)."""
 
 
 def format_value(value, spec):
@@ -164,6 +230,26 @@ class CalibrationNode(Node):
             0.1, 100.0, 'Multiplies the calibration\'s estimated uncertainties: they assume '
                         'independent corner errors and come out ~1.5-2.5x too small on synthetic '
                         'data.'))
+        # Final calibration pass (see calibration.final_calibration).
+        self.declare_parameter('outlier_z_limit', 6.0, float_range(
+            1.0, 100.0, 'Final pass: a view is an outlier candidate if its leave-one-out error '
+                        '(how badly the other views predict it) has a robust z-score above this '
+                        'among all views.'))
+        self.declare_parameter('outlier_min_views', 15, ParameterDescriptor(
+            description='Final pass: no outlier check with fewer views (the check is unreliable '
+                        'with few).',
+            integer_range=[IntegerRange(from_value=3, to_value=10000, step=1)]))
+        self.declare_parameter('outlier_max_uncertainty_increase', 1.5, float_range(
+            1.0, 1000.0, 'Final pass: a candidate is only removed if that raises the mean '
+                         'uncertainty over the image by at most this factor; otherwise no other '
+                         'view covers its region and it is kept as a suspect.'))
+        self.declare_parameter('outlier_max_fraction', 0.1, float_range(
+            0.0, 0.5, 'Final pass: at most this fraction of the views is removed.'))
+        self.declare_parameter(
+            'output_file', '~/.ros/smart_calibration/calibration_%Y-%m-%d_%H-%M-%S.yaml',
+            ParameterDescriptor(
+                description='Where Accept saves the calibration (OpenCV YAML), on the machine '
+                            'running this node; strftime placeholders (%Y, %m, ...) and ~ work.'))
         # Live parameter values, read once per frame by the worker.
         self.live = {name: self.get_parameter(name).value for name in LIVE_PARAMETERS}
 
@@ -178,9 +264,17 @@ class CalibrationNode(Node):
 
         self.bridge = CvBridge()
         self.image_size = None  # (width, height) of the incoming images
-        # Detections kept for calibration (touched by the detection worker only).
+        # Kept views, their thumbnails and the final pass state; used from the detection and
+        # calibration threads and the service callbacks, always under _lock.
+        self._lock = threading.Lock()
         self.views = ViewCollection(self.square_size, reference_outline(
             self.board_mode, self.board_cols, self.board_rows))
+        self.thumbnails = []  # JPEG bytes per kept view
+        self._state = FinalCalibration.STATE_COLLECTING
+        self._stage = ''
+        self._run = 0  # increases with every final pass (and when one is cancelled)
+        self._final = None  # FinalResult of the current pass
+        self._final_views = None  # (image points per view, image size) the pass started from
 
         self.detection_pub = self.create_publisher(BoardDetection, '~/detection', 10)
         # The image the detector works on, for display (the GUI does not need the raw stream).
@@ -192,6 +286,13 @@ class CalibrationNode(Node):
         self.calibration_pub = self.create_publisher(
             CalibrationState, '~/calibration',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.final_pub = self.create_publisher(
+            FinalCalibration, '~/final_calibration',
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self.create_service(Finish, '~/finish', self.on_finish)
+        self.create_service(Trigger, '~/resume', self.on_resume)
+        self.create_service(Trigger, '~/accept', self.on_accept)
+        self.create_service(GetView, '~/get_view', self.on_get_view)
 
         # Detection is slower than the camera, so it runs in a worker thread on the newest frame
         # only; frames that arrive while it is busy are dropped. The image callback never blocks.
@@ -207,6 +308,7 @@ class CalibrationNode(Node):
         self._requested_views = 0  # view count of the last calibration request
         self._calibrator = threading.Thread(target=self._calibration_loop, daemon=True)
         self._calibrator.start()
+        self.publish_final()
 
         image_topic = self.resolve_topic_name('image')
         qos = image_qos(self, image_topic, self.declare_parameter(
@@ -314,16 +416,20 @@ class CalibrationNode(Node):
         detection.detection_time_ms = detection_time_ms
 
         assessment = None
-        if board is not None:
-            stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            assessment = self.views.consider(
-                board, size, stamp, live['max_board_speed'], live['max_corner_residual'],
-                live['min_view_distance'])
-            if assessment.view is not None:
-                self.get_logger().info(f'kept view {len(self.views)}')
-                self.request_calibration(live, msg.header)
+        with self._lock:
+            if board is not None:
+                stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+                # After Finish the checks still run (for the status box), but nothing is kept.
+                assessment = self.views.consider(
+                    board, size, stamp, live['max_board_speed'], live['max_corner_residual'],
+                    live['min_view_distance'],
+                    keep=self._state == FinalCalibration.STATE_COLLECTING)
+                if assessment.view is not None:
+                    self.thumbnails.append(jpeg(gray, THUMBNAIL_WIDTH, THUMBNAIL_JPEG_QUALITY))
+                    self.get_logger().info(f'kept view {len(self.views)}')
+                    self.request_calibration(live, msg.header)
+            detection.kept_views = len(self.views)
         fill_checks(detection, assessment)
-        detection.kept_views = len(self.views)
 
         # Preview first: the GUI pairs both by timestamp and shows a pair once it is complete.
         if watched:
@@ -344,17 +450,25 @@ class CalibrationNode(Node):
             f'{"found" if detection.found else "not found"} in {detection_time_ms:.1f} ms'
             + checks)
 
-    def request_calibration(self, live, header):
-        """Hand the kept views to the calibration thread if enough new ones were kept."""
+    def request_calibration(self, live, header, force=False):
+        """
+        Hand the kept views to the calibration thread if enough new ones were kept (under _lock).
+
+        force: whenever there are enough views (e.g. after views were removed).
+        """
         count = len(self.views)
-        if (count < live['min_calibration_views']
-                or count - self._requested_views < live['calibrate_every_views']):
+        if count < live['min_calibration_views'] or (
+                not force and count - self._requested_views < live['calibrate_every_views']):
             return
         self._requested_views = count
         objects, images, size = self.views.calibration_input()
+        self._queue_calibration(('background', objects, images, size, header,
+                                 live['free_k3_after_views'], live['uncertainty_scale']))
+
+    def _queue_calibration(self, request):
+        """Replace any waiting calibration request (only the newest matters)."""
         with self._calibration_ready:
-            self._calibration_request = (objects, images, size, header,
-                                         live['free_k3_after_views'], live['uncertainty_scale'])
+            self._calibration_request = request
             self._calibration_ready.notify()
 
     def _calibration_loop(self):
@@ -365,14 +479,20 @@ class CalibrationNode(Node):
                 if self._stopping:
                     return
                 request, self._calibration_request = self._calibration_request, None
-            objects, images, size, header, free_k3_after_views, scale = request
-            try:
-                result = calibrate_views(objects, images, size, free_k3_after_views, scale)
-            except (cv2.error, np.linalg.LinAlgError) as error:
-                self.get_logger().warn(f'calibration from {len(objects)} views failed: {error}')
-                continue
+            if request[0] == 'final':
+                self.run_final(*request[1:])
+            else:
+                self.run_background(*request[1:])
             if not self.context.ok():
                 return
+
+    def run_background(self, objects, images, size, header, free_k3_after_views, scale):
+        try:
+            result = calibrate_views(objects, images, size, free_k3_after_views, scale)
+        except (cv2.error, np.linalg.LinAlgError) as error:
+            self.get_logger().warn(f'calibration from {len(objects)} views failed: {error}')
+            return
+        if self.context.ok():
             self.calibration_pub.publish(calibration_message(result, header))
             u = result.uncertainty
             self.get_logger().info(
@@ -381,17 +501,154 @@ class CalibrationNode(Node):
                 f'{u["focal"]:.2f}, centre {u["centre"]:.2f}, distortion '
                 f'{u["distortion"]:.2f})' + ''.join(f'; {hint}' for hint in result.hints))
 
+    # ------------------------------------------------------------------ final calibration pass
+
+    def run_final(self, run, objects, images, size, keep, live):
+        """Run the final pass of final run number run, unless it is cancelled meanwhile."""
+        def progress(text):
+            with self._lock:
+                if self._run != run:
+                    raise Cancelled()
+                self._stage = text
+            self.publish_final()
+
+        start = time.perf_counter()
+        try:
+            result = final_calibration(
+                objects, images, size, live['free_k3_after_views'], live['uncertainty_scale'],
+                live['outlier_z_limit'], live['outlier_min_views'],
+                live['outlier_max_uncertainty_increase'], live['outlier_max_fraction'], keep,
+                progress)
+        except Cancelled:
+            return
+        except (cv2.error, np.linalg.LinAlgError) as error:
+            with self._lock:
+                if self._run != run:
+                    return
+                self._state, self._stage = FinalCalibration.STATE_FAILED, f'failed: {error}'
+            self.get_logger().error(f'final calibration failed: {error}')
+            self.publish_final()
+            return
+        with self._lock:
+            if self._run != run:
+                return
+            self._state, self._stage, self._final = FinalCalibration.STATE_DONE, '', result
+        self.publish_final()
+        final = result.final
+        removed = ', '.join(f'#{v.index + 1} (z {v.z:.1f})' for v in result.removed) or 'none'
+        suspects = ', '.join(f'#{v.index + 1} (z {v.z:.1f}, without it: '
+                             f'{without_text(v.uncertainty_ratio)})' for v in result.suspects)
+        self.get_logger().info(
+            f'final calibration in {time.perf_counter() - start:.1f} s: {final.views} of '
+            f'{len(objects)} views, rms {final.rms:.3f} px, uncertainty '
+            f'{final.uncertainty["total"]:.2f} px; '
+            + (f'removed: {removed}' if result.checked else
+               'too few views for the outlier check (outlier_min_views)')
+            + (f'; suspects kept: {suspects}' if suspects else ''))
+
+    def publish_final(self):
+        with self._lock:
+            msg = FinalCalibration(state=self._state, stage=self._stage, run=self._run)
+            msg.header.stamp = self.get_clock().now().to_msg()
+            result = self._final if self._state in RESULT_STATES else None
+            if self._final_views is not None:
+                fill_final(msg, result, *self._final_views, msg.header)
+        self.final_pub.publish(msg)
+
+    def on_finish(self, request, response):
+        live = self.live
+        with self._lock:
+            count = len(self.views)
+            needed = live['min_calibration_views']
+            if self._state == FinalCalibration.STATE_RUNNING:
+                response.message = 'the final calibration is already running'
+            elif self._state == FinalCalibration.STATE_ACCEPTED:
+                response.message = 'the result is accepted; resume collecting first'
+            elif count < needed:
+                response.message = f'only {count} views kept, need {needed}'
+            else:
+                response.accepted = True
+                response.message = f'final calibration of {count} views started'
+                self._state, self._stage = FinalCalibration.STATE_RUNNING, 'starting'
+                self._run += 1
+                self._final = None
+                objects, images, size = self.views.calibration_input()
+                self._final_views = (images, size)
+                keep = sorted({i for i in request.keep if i < count})
+                self._queue_calibration(('final', self._run, objects, images, size, keep, live))
+        if response.accepted:
+            self.publish_final()
+        self.get_logger().info(f'finish: {response.message}')
+        return response
+
+    def on_resume(self, request, response):
+        with self._lock:
+            if self._state == FinalCalibration.STATE_COLLECTING:
+                response.message = 'already collecting'
+                return response
+            # Removed views are dropped: they were judged bad (restored ones were not removed).
+            removed = [view.index for view in self._final.removed] if (
+                self._final is not None and self._state in RESULT_STATES) else []
+            self.views.remove(removed)
+            self.thumbnails = [t for i, t in enumerate(self.thumbnails) if i not in removed]
+            self._state, self._stage = FinalCalibration.STATE_COLLECTING, ''
+            self._run += 1  # cancels a pass still running
+            self._final, self._final_views = None, None
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            self.request_calibration(self.live, header, force=True)
+            response.success = True
+            response.message = (f'collecting again with {len(self.views)} views'
+                                + (f' ({len(removed)} removed views dropped)' if removed else ''))
+        self.publish_final()
+        self.get_logger().info(f'resume: {response.message}')
+        return response
+
+    def on_accept(self, request, response):
+        """Save the final calibration (output_file) and mark it accepted."""
+        with self._lock:
+            if self._state != FinalCalibration.STATE_DONE:
+                response.message = 'no final calibration result to accept'
+                return response
+            result = self._final
+            final = result.final
+            now = datetime.now()
+            path = output_path(self.live['output_file'], now)
+            try:
+                write_calibration(path, final.camera_matrix, final.distortion, final.rms,
+                                  final.image_size, 'plumb_bob', now)
+            except OSError as error:
+                response.message = f'not accepted: cannot save the calibration: {error}'
+                self.get_logger().error(response.message)
+                return response
+            self._state = FinalCalibration.STATE_ACCEPTED
+        self.publish_final()
+        response.success = True
+        response.message = f'calibration saved to {path}' + (
+            '. Warning: its distortion model is not valid near the image corners'
+            if final.distortion_folds else '')
+        self.get_logger().info(f'calibration accepted, saved to {path}\n{summary(result)}')
+        return response
+
+    def on_get_view(self, request, response):
+        with self._lock:
+            if request.index >= len(self.views):
+                return response
+            view = self.views.views[request.index]
+            thumbnail = self.thumbnails[request.index]
+            result = self._final if self._state in RESULT_STATES else None
+        response.found = True
+        response.thumbnail = compressed_image(thumbnail)
+        response.image_width, response.image_height = view.image_size
+        response.image_points = view.image_points.ravel().tolist()
+        if result is not None:
+            response.residuals = result.view_residuals(request.index).astype(
+                np.float32).ravel().tolist()
+        return response
+
     def make_preview(self, gray, header):
-        if gray.shape[1] > self.preview_max_width:
-            scale = self.preview_max_width / gray.shape[1]
-            gray = cv2.resize(gray, (self.preview_max_width, round(gray.shape[0] * scale)),
-                              interpolation=cv2.INTER_AREA)
-        preview = CompressedImage()
-        preview.header = header
-        preview.format = 'mono8; jpeg compressed mono8'  # image_transport's naming
-        preview.data = cv2.imencode(
-            '.jpg', gray, [cv2.IMWRITE_JPEG_QUALITY, self.preview_jpeg_quality])[1].tobytes()
-        return preview
+        return compressed_image(jpeg(gray, self.preview_max_width, self.preview_jpeg_quality),
+                                header)
 
     def prepare_image(self, msg):
         """Convert an Image message to a single-channel image at its bit depth, None on failure."""

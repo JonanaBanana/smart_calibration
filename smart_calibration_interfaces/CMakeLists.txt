@@ -20,7 +20,10 @@ find_package(geometry_msgs REQUIRED)
 set(interface_files
   "msg/BoardDetection.msg"
   "msg/CalibrationState.msg"
+  "msg/FinalCalibration.msg"
   "msg/ToneHistogram.msg"
+  "srv/Finish.srv"
+  "srv/GetView.srv"
 )
 
 # rosidl_generate_interfaces() fails without any files, so it is only called once the first

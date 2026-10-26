@@ -25,9 +25,7 @@ class HistogramWidget(QWidget):
         super().__init__(parent)
         self.setFixedHeight(110)
         self.setMinimumWidth(150)
-        self.setToolTip('Grey: histogram before the contrast curve. Orange: after it. '
-                        'Cyan: contrast curve (input -> output), dashed: midpoint.\n'
-                        'Put the midpoint between the dark and light squares\' peaks.')
+        self.setToolTip('Put the midpoint between the dark and light squares\' peaks.')
         self._before = None
         self._after = None
         self._strength = 0.0

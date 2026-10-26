@@ -2,7 +2,8 @@
 ROS side of the calibration GUI, used from the Qt thread through thread-safe methods.
 
 Receives the calibration node's previews, detections and calibrations (and, on request, the raw
-camera stream), and reads / sets the calibration node's live parameters.
+camera stream), reads / sets the calibration node's live parameters, and drives its final
+calibration pass (finish, resume, accept, and fetching kept views for display).
 """
 
 import collections
@@ -19,11 +20,14 @@ from rclpy.parameter import Parameter, parameter_value_to_python
 from rclpy.qos import (
     DurabilityPolicy, qos_profile_parameter_events, QoSProfile, ReliabilityPolicy)
 from sensor_msgs.msg import CompressedImage, Image
+from std_srvs.srv import Trigger
 
 from smart_calibration.image_preprocessing import (
     FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS, to_mono8)
 from smart_calibration.qos import image_qos
-from smart_calibration_interfaces.msg import BoardDetection, CalibrationState, ToneHistogram
+from smart_calibration_interfaces.msg import (
+    BoardDetection, CalibrationState, FinalCalibration, ToneHistogram)
+from smart_calibration_interfaces.srv import Finish, GetView
 
 # Buffers for pairing images with detections by timestamp; they must cover the detection
 # latency (a detection arrives after its preview / raw frame).
@@ -32,6 +36,11 @@ RAW_BUFFER_SIZE = 30
 DETECTION_BUFFER_SIZE = 30
 
 Frame = collections.namedtuple('Frame', ['stamp_ns', 'image', 'encoding'])
+
+# A kept view fetched from the calibration node (GetView): thumbnail (h, w) uint8, the full
+# image's width, corners (N, 2) and their residuals (N, 2) or None, all in full image pixels.
+KeptView = collections.namedtuple('KeptView', ['thumbnail', 'image_width', 'points',
+                                               'residuals'])
 
 Snapshot = collections.namedtuple('Snapshot', [
     'detection',          # newest BoardDetection, or None
@@ -44,6 +53,9 @@ Snapshot = collections.namedtuple('Snapshot', [
     'parameters',         # {name: value} of the calibration node, as far as known
     'histogram',          # newest ToneHistogram, or None
     'calibration',        # newest CalibrationState, or None
+    'final',              # newest FinalCalibration, or None
+    'views',              # {(run, index): KeptView} fetched for the final pass display
+    'service_message',    # reply to the last finish / resume / accept call, or None
     'preview_fps',
     'detection_fps',
     'raw_fps',
@@ -137,6 +149,18 @@ class GuiNode(Node):
             CalibrationState, f'{self.target}/calibration', self.calibration_callback,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
+        # Final calibration pass: its state (transient local like calibrations) and services.
+        self._final = None
+        self.final_sub = self.create_subscription(
+            FinalCalibration, f'{self.target}/final_calibration', self.final_callback,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._finish_client = self.create_client(Finish, f'{self.target}/finish')
+        self._resume_client = self.create_client(Trigger, f'{self.target}/resume')
+        self._accept_client = self.create_client(Trigger, f'{self.target}/accept')
+        self._view_client = self.create_client(GetView, f'{self.target}/get_view')
+        self._views = {}  # (run, index) -> KeptView, or None while requested
+        self._service_message = None
+
         # Raw camera stream: subscribed only while the raw view is switched on.
         self._raw_wanted = False
         self._raw_sub = None
@@ -183,6 +207,12 @@ class GuiNode(Node):
     def calibration_callback(self, msg):
         with self._lock:
             self._calibration = msg
+
+    def final_callback(self, msg):
+        with self._lock:
+            if self._final is not None and msg.run != self._final.run:
+                self._views.clear()  # residuals and indices belong to one final pass
+            self._final = msg
 
     def raw_callback(self, msg):
         try:
@@ -233,7 +263,9 @@ class GuiNode(Node):
             return Snapshot(
                 self._newest_detection, age, preview, preview_detection, raw_frame,
                 raw_detection, self._raw_frames[-1] if self._raw_frames else None,
-                dict(self.parameters), self._histogram, self._calibration,
+                dict(self.parameters), self._histogram, self._calibration, self._final,
+                {key: view for key, view in self._views.items() if view is not None},
+                self._service_message,
                 self._preview_rate.rate(now),
                 self._detection_rate.rate(now), self._raw_rate.rate(now))
 
@@ -282,3 +314,60 @@ class GuiNode(Node):
         with self._lock:
             for parameter in list(msg.new_parameters) + list(msg.changed_parameters):
                 self.parameters[parameter.name] = parameter_value_to_python(parameter.value)
+
+    # ------------------------------------------------------------------ final calibration pass
+
+    def _call(self, client, request, name):
+        """Call a service; its reply message is shown by the GUI. False if unreachable."""
+        if not client.service_is_ready():
+            with self._lock:
+                self._service_message = f'{name}: calibration node not reachable'
+            return False
+        future = client.call_async(request)
+        future.add_done_callback(lambda done: self._store_reply(name, done))
+        return True
+
+    def _store_reply(self, name, future):
+        response = future.result()
+        text = 'no reply' if response is None else response.message
+        with self._lock:
+            self._service_message = f'{name}: {text}'
+
+    def finish_available(self):
+        """Whether the calibration node's finish service is reachable."""
+        return self._finish_client.service_is_ready()
+
+    def finish(self, keep=()):
+        """Stop collecting and run the final pass; keep: view indices it must not remove."""
+        return self._call(self._finish_client, Finish.Request(keep=list(keep)), 'finish')
+
+    def resume(self):
+        return self._call(self._resume_client, Trigger.Request(), 'resume')
+
+    def accept(self):
+        return self._call(self._accept_client, Trigger.Request(), 'accept')
+
+    def request_view(self, run, index):
+        """Fetch a kept view of final pass run (appears in snapshot().views), once."""
+        with self._lock:
+            if (run, index) in self._views or not self._view_client.service_is_ready():
+                return
+            self._views[(run, index)] = None
+        future = self._view_client.call_async(GetView.Request(index=index))
+        future.add_done_callback(lambda done: self._store_view(run, index, done))
+
+    def _store_view(self, run, index, future):
+        response = future.result()
+        view = None
+        if response is not None and response.found:
+            thumbnail = cv2.imdecode(np.frombuffer(response.thumbnail.data, np.uint8),
+                                     cv2.IMREAD_GRAYSCALE)
+            points = np.asarray(response.image_points, np.float32).reshape(-1, 2)
+            residuals = (np.asarray(response.residuals, np.float32).reshape(-1, 2)
+                         if len(response.residuals) else None)
+            view = KeptView(thumbnail, response.image_width, points, residuals)
+        with self._lock:
+            if view is None:
+                self._views.pop((run, index), None)  # try again on the next request
+            elif self._final is not None and self._final.run == run:
+                self._views[(run, index)] = view

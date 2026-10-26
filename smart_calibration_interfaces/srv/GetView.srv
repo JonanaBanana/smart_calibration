@@ -1,0 +1,20 @@
+# One kept view for display: its thumbnail and how the calibration fits its corners.
+
+# 0-based view index.
+uint32 index
+---
+bool found
+
+# What the detector saw (after preprocessing), downscaled.
+sensor_msgs/CompressedImage thumbnail
+
+# Size of the full image the points refer to.
+uint32 image_width
+uint32 image_height
+
+# Detected corners, x and y interleaved, px.
+float32[] image_points
+
+# Detected minus projected corner positions, x and y interleaved, px: in the final calibration,
+# or for a removed view in its leave-one-out prediction. Empty without a final pass.
+float32[] residuals

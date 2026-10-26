@@ -273,3 +273,16 @@ def test_calibration_input_works_for_pinhole_and_fisheye():
         object_points_list, image_points, image_size, None, None,
         flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC)
     assert rms < 0.1
+
+
+def test_views_are_not_kept_while_collection_is_stopped_and_can_be_removed():
+    views = collection()
+    consider(views, chessboard(GRID), (640, 480), 1.0)
+    stopped = views.consider(chessboard(GRID), (640, 480), 1.1, MAX_SPEED, MAX_RESIDUAL,
+                             MIN_DISTANCE, keep=False)
+    assert stopped.speed_ok and stopped.distance_ok and stopped.view is None and len(views) == 0
+    for i in range(3):
+        consider_still(views, chessboard(GRID + 100.0 * i), (640, 480), 2.0 + i)
+    first, third = views.views[0], views.views[2]
+    views.remove([1])
+    assert views.views == [first, third]

@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 
 from smart_calibration.calibration import (
-    axis_offset, board_tilt, calibrate_views, map_grid, pose_hints)
+    axis_offset, board_tilt, calibrate, calibrate_views, distortion_folds_in_image,
+    final_calibration, FOLD_HINT, map_grid, pose_hints, summary, uncertainty_hints)
 
 SIZE = (1280, 720)
 CAMERA_MATRIX = np.array([[640.0, 0.0, 639.5], [0.0, 640.0, 359.5], [0.0, 0.0, 1.0]])
@@ -84,7 +85,7 @@ def test_boards_facing_the_camera_leave_the_focal_length_uncertain():
     flat_result = calibrate_views(*views(flat), SIZE, 20, 1)
     tilted_result = calibrate_views(*views(tilted), SIZE, 20, 1)
     assert flat_result.uncertainty['focal'] > 3 * tilted_result.uncertainty['focal']
-    assert flat_result.hints and 'Tilt the board' in flat_result.hints[0]
+    assert flat_result.hints and 'Tilt the board more' in flat_result.hints[0]
 
 
 def test_board_tilt():
@@ -99,7 +100,7 @@ def test_board_tilt():
 
 
 def test_pose_hints():
-    assert 'Tilt the board' in pose_hints([[5, 0], [30, 45]])[0]
+    assert 'Tilt the board more' in pose_hints([[5, 0], [30, 45]])[0]
     # Only turned about the vertical axis (axis 90): the horizontal tilt is missing; the axes
     # are all aligned with the image axes.
     hints = pose_hints([[30, 90], [25, 85], [30, 95]])
@@ -112,3 +113,99 @@ def test_map_grid_divides_the_image_evenly():
     assert grid.shape == (18, 32, 2)
     np.testing.assert_allclose(grid[0, 0], [19.5, 19.5])
     np.testing.assert_allclose(grid[-1, -1], [1259.5, 699.5])
+
+
+def bent(image_points, amount):
+    """Bow the view's rows by up to amount px in the middle (a flexing board)."""
+    points = image_points.astype(np.float64).copy()
+    u = (BOARD[:, 0, 0] - BOARD[:, 0, 0].min()) / np.ptp(BOARD[:, 0, 0]) * 2 - 1
+    points[:, 0, 1] += amount * (1 - u ** 2)
+    return points.astype(np.float32)
+
+
+def test_leave_one_out_errors_match_recalibrating_without_the_view():
+    objects, images = views(VARIED[:10])
+    result = calibrate_views(objects, images, SIZE, 20, 1, with_leave_one_out=True)
+    assert result.leave_one_out.shape == (10,)
+    assert calibrate_views(objects, images, SIZE, 20, 1).leave_one_out is None
+    for i in (0, 4):
+        rest = [k for k in range(10) if k != i]
+        _, K, D, _, _ = calibrate([objects[k] for k in rest], [images[k] for k in rest], SIZE,
+                                  True)
+        _, rvec, tvec = cv2.solvePnP(objects[i], images[i], K, D)
+        projected, _ = cv2.projectPoints(objects[i].astype(np.float64), rvec, tvec, K, D)
+        exact = np.sqrt(np.mean(np.sum((images[i] - projected)[:, 0] ** 2, axis=1)))
+        assert abs(result.leave_one_out[i] / exact - 1) < 0.05
+
+
+def final(objects, images, **overrides):
+    settings = dict(free_k3_after_views=20, uncertainty_scale=1, z_limit=6, min_views=10,
+                    max_uncertainty_increase=1.5, max_removed_fraction=0.1)
+    settings.update(overrides)
+    return final_calibration(objects, images, SIZE, **settings)
+
+
+def test_final_calibration_removes_a_bent_view_and_keeps_clean_ones():
+    objects, images = views(VARIED)
+    clean = final(objects, images)
+    assert clean.checked and clean.removed == () and clean.kept == tuple(range(15))
+    images[6] = bent(images[6], 3.0)
+    stages = []
+    result = final(objects, images, progress=stages.append)
+    assert [view.index for view in result.removed] == [6] and result.suspects == ()
+    assert 6 not in result.kept and len(result.kept) == 14
+    flagged = result.removed[0]
+    assert flagged.z > 6 and flagged.error > result.initial_limit
+    assert flagged.uncertainty_ratio <= 1.5 and flagged.residuals.shape == (54, 2)
+    assert np.array_equal(result.view_residuals(6), flagged.residuals)
+    assert result.view_residuals(7).shape == (54, 2)
+    assert result.final.rms < result.initial.rms
+    assert stages[0] == 'calibrating all 15 views' and len(stages) == 2
+
+
+def test_final_calibration_guards():
+    objects, images = views(VARIED)
+    images[6] = bent(images[6], 3.0)
+    # Too few views for the outlier check: calibrated, nothing removed.
+    few = final(objects, images, min_views=16)
+    assert not few.checked and few.removed == () and few.kept == tuple(range(15))
+    # Restored by the user: never removed.
+    assert final(objects, images, forced=[6]).removed == ()
+    # Removing it would raise the uncertainty too much: kept as a suspect.
+    guarded = final(objects, images, max_uncertainty_increase=0.2)
+    assert guarded.removed == () and [view.index for view in guarded.suspects] == [6]
+    assert 6 in guarded.kept
+    # At most this fraction removed (here: none of 15).
+    assert final(objects, images, max_removed_fraction=0.05).removed == ()
+
+
+def test_uncertainty_hints_name_a_weak_focal_length_or_principal_point():
+    def hints(focal, centre, distortion):
+        return uncertainty_hints(dict(total=max(focal, centre, distortion), focal=focal,
+                                      centre=centre, distortion=distortion))
+    assert 'focal length' in hints(3.0, 1.0, 2.0)[0]
+    assert 'image centre' in hints(1.0, 3.0, 2.0)[0]
+    assert hints(1.0, 2.0, 3.0) == ()
+    assert hints(math.nan, math.nan, math.nan) == ()
+
+
+def test_distortion_folding_inside_the_image():
+    # k1 -0.3 alone: turns back at r = 1.05, reaching a distorted radius of 0.70, while the image
+    # corners are at 1.15.
+    assert distortion_folds_in_image(CAMERA_MATRIX, [-0.3, 0, 0, 0, 0], SIZE)
+    assert not distortion_folds_in_image(CAMERA_MATRIX, DISTORTION, SIZE)  # never turns back
+    # Turns back, but only beyond the image corners (a narrow image).
+    narrow = [[640.0, 0.0, 199.5], [0.0, 640.0, 149.5], [0.0, 0.0, 1.0]]
+    assert not distortion_folds_in_image(narrow, [-0.3, 0, 0, 0, 0], (400, 300))
+    result = calibrate_views(*views(VARIED), SIZE, 20, 1)
+    assert not result.distortion_folds and FOLD_HINT not in result.hints
+
+
+def test_summary_lists_the_result():
+    objects, images = views(VARIED)
+    images[6] = bent(images[6], 3.0)
+    text = summary(final(objects, images))
+    lines = text.splitlines()
+    assert lines[0] == '  image        1280 x 720, plumb_bob'
+    assert lines[1] == '  views        14 used, 1 removed, k3 fixed'
+    assert lines[4].split()[:2] == ['fx', 'fy'] and len(lines) == 8
