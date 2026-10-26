@@ -5,6 +5,8 @@ chessboard in the camera stream, keeps only good and new views, and calibrates i
 while a GUI shows where the calibration is still uncertain. When enough views are collected, a
 final pass removes outlier views, and the result is saved as an OpenCV YAML file.
 
+![Collecting calibration views with a thermal camera: live corner detection, view checks and the calibration status](assets/sc_example_1.gif)
+
 - **Board modes:** a plain chessboard, or an oversized radon checkerboard with markers that only
   needs to be partly visible
 - **View checks:** motion, misplaced corners and duplicates are rejected before a view is kept
@@ -87,6 +89,8 @@ ros2 launch smart_calibration gui.launch.py
    - **Resume:** collects more views.
    - **Suspect** (amber): a flagged view that is the only one of its region. Add views there.
 4. **Accept** saves the calibration to `output_file`, on the machine running the node.
+
+![After Finish: all kept views over the last frame, a selected view with its corner errors, and Accept](assets/sc_example_2.gif)
 
 Check **undistorted** in the View box to see the stream undistorted by the current calibration.
 A dashed amber line marks where the distortion model is not valid yet; views near the image
@@ -194,6 +198,7 @@ smart_calibration/                 repository root
 ├── smart_calibration/             ament_python package: node, GUI, config, launch files, tests
 ├── smart_calibration_interfaces/  messages and services
 ├── utility/                       pattern generator, synthetic dataset, evaluation, prototypes
+├── assets/                        README images
 ├── requirements.txt               venv packages
 └── THIRD_PARTY_NOTICES.md
 ```
