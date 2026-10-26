@@ -67,8 +67,7 @@ def test_standard_deviations_match_opencv_and_scale():
     objects, images = views(VARIED)
     result = calibrate_views(objects, images, SIZE, free_k3_after_views=0, uncertainty_scale=1)
     assert not result.k3_fixed
-    # calibrateCameraExtended's standard deviations are wrong before OpenCV 4.8 (the system
-    # OpenCV of ROS Humble is 4.5.4; the venv has 4.11).
+    # calibrateCameraExtended's standard deviations are wrong before OpenCV 4.8.
     if tuple(int(v) for v in cv2.__version__.split('.')[:2]) >= (4, 8):
         std = cv2.calibrateCameraExtended(objects, images, SIZE, None, None)[5].ravel()[:9]
         np.testing.assert_allclose(result.std_deviations, std, rtol=1e-3)

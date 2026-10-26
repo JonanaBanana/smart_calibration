@@ -2,13 +2,10 @@
 """
 Evaluate smart_calibration's detection and calibration on a synthetic dataset.
 
-Runs the package's own preprocessing and board detection (the source in this repository, not an
-installed copy) on every image of a dataset made by synthetic_dataset.py and compares with the
-ground truth: detection rate (per board type and tag), corner error, origin of marker boards,
-false detections on images without a board. Then calibrates from all detections of each board
-type and compares with the true camera: how far the estimated lens model maps pixels from the
-true one across the image (comparing distortion coefficients directly is misleading: they trade
-off against each other).
+Runs the package's preprocessing and detection (from this repository's source) on a dataset made
+by synthetic_dataset.py and reports detection rates, corner errors and false detections. Then
+calibrates from the detections and reports how far the estimated lens model maps pixels from the
+true one.
 
 Usage (venv active, from the repository root):
     python utility/evaluate_dataset.py dataset/synthetic [--exhaustive] [--accuracy]
@@ -37,13 +34,7 @@ BOARD_MODES = ('chessboard', 'oversized_marker')
 
 
 def true_positions(board, entry):
-    """
-    True pixel position (N, 2) of each detected corner (row-major), or None if they do not match.
-
-    chessboard: the detected grid against the true grid, in both numbering directions (the
-    detector may start from either end). marker board: each detected corner's board coordinates
-    looked up in the ground truth; a missing coordinate means a wrong origin.
-    """
+    """Return the true pixel position (N, 2) of each detected corner, or None if they differ."""
     truth = np.array(entry['corners']).reshape(*entry['grid'], 2)
     corners = board.corners.astype(np.float64)
     if entry['board'] == 'chessboard':
@@ -61,12 +52,7 @@ def true_positions(board, entry):
 
 
 def corner_check(board, max_residual):
-    """
-    The calibration node's corner check of a detection: (largest residual or None, flagged mask).
-
-    flagged: (rows, cols) corners whose residual exceeds max_residual (see
-    smart_calibration.views.corner_residuals); any flagged corner discards the frame.
-    """
+    """Run the node's corner check: (largest residual or None, (rows, cols) flagged mask)."""
     residuals = corner_residuals(board)
     largest = float(np.nanmax(residuals)) if np.isfinite(residuals).any() else None
     with np.errstate(invalid='ignore'):
@@ -137,14 +123,9 @@ def visualize(gray, entry, board, expected, path, max_residual):
     """
     Save the image with true and detected corners, and a zoomed inset of the worst corner.
 
-    The inset shows the white-framed square around the worst corner, in the image corner
-    opposite to it; purple in the inset is outside the image.
-
-    Truth: cyan crosses (all corners of the board inside the image). Detections: circles, green
-    < 0.5 px error, yellow < 1 px, red >= 1 px with a line to the true position; magenta if the
-    detection does not match the board (wrong grid or origin); grey x for corners the border rule
-    drops. Orange rings: corners whose residual exceeds max_residual; the label says whether the
-    corner check discards the frame.
+    Truth: cyan crosses. Detections: circles, green < 0.5 px error, yellow < 1 px, red >= 1 px;
+    magenta: wrong grid or origin; grey x: dropped by the border rule; orange ring: flagged by
+    the corner check. Purple in the inset is outside the image.
     """
     canvas = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     truth_all = np.array(entry['corners'])[np.array(entry['visible'])]
@@ -161,7 +142,6 @@ def visualize(gray, entry, board, expected, path, max_residual):
         _draw_marks(canvas, expected, detected, errors, flagged=flagged, dropped=dropped)
         worst = int(np.argmax(errors))
         cx, cy = detected[worst]
-        # Padded with purple ("outside the image"): the detector can place corners beyond it.
         r = INSET_RADIUS
         padded = cv2.copyMakeBorder(cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), r, r, r, r,
                                     cv2.BORDER_CONSTANT, value=OUTSIDE_COLOR)
@@ -174,8 +154,7 @@ def visualize(gray, entry, board, expected, path, max_residual):
         _draw_marks(inset, expected[near], detected[near], errors[near], INSET_ZOOM, (x0, y0),
                     flagged[near], dropped[near])
         cv2.rectangle(inset, (0, 0), (inset.shape[1] - 1, inset.shape[0] - 1), (255, 255, 255))
-        # In the image corner opposite the worst corner, so it does not cover it (bottom: above
-        # the label).
+        # In the image corner opposite the worst corner.
         height, width = gray.shape
         ix = width - 10 - inset.shape[1] if cx < width / 2 else 10
         iy = height - 34 - inset.shape[0] if cy < height / 2 else 10
@@ -199,12 +178,10 @@ def visualize(gray, entry, board, expected, path, max_residual):
 
 def mapping_error(camera, K, D, step=16):
     """
-    Pixel distance between the true and an estimated lens model over the image.
+    Return the pixel distance between the true and an estimated lens model over the image.
 
-    The true rays through a grid of pixels are projected with the estimated model. Returns
-    (max, mean) as is, and (max, mean, angle in degrees) after the best rotation between the true
-    and the estimated camera frame: a principal point error looks much like a small rotation of
-    the camera, so this separates it from errors in the lens model's shape.
+    (max, mean), and (max, mean, angle in degrees) after the best rotation between the camera
+    frames, which absorbs most of a principal point error.
     """
     us, vs = np.meshgrid(np.arange(0, camera.width, step), np.arange(0, camera.height, step))
     pixels = np.column_stack([us.ravel(), vs.ravel()]).astype(np.float64)
@@ -292,8 +269,7 @@ def evaluate(dataset, args):
                 continue
             stats[mode]['rms'].append(float(np.sqrt(np.mean(errors ** 2))))
             stats[mode]['max'].append(float(errors.max()))
-            # What the border rule and the corner check do, as in the calibration node: corners
-            # > 1 px off that are dropped, in a discarded frame, or still used.
+            # Corners > 1 px off: dropped, in a discarded frame, or still used.
             valid = board.valid.ravel()
             _, flagged = corner_check(board, args.max_residual)
             discarded = bool(flagged.any())

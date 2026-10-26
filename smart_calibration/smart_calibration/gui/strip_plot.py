@@ -1,4 +1,4 @@
-"""Strip plot of one value per view (leave-one-out errors) with a limit line; click selects."""
+"""Strip plot of one value per view, with a limit line; clicking a dot selects it."""
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
@@ -15,7 +15,6 @@ LIMIT_COLOR = QColor(255, 200, 60)
 class StripPlot(QWidget):
     """Dots along a horizontal axis from 0, coloured by style; a vertical line at the limit."""
 
-    # Index of the dot clicked.
     selected = Signal(int)
 
     def __init__(self, parent=None):
@@ -40,7 +39,7 @@ class StripPlot(QWidget):
         return max(max(candidates, default=1.0) * 1.1, 1e-6)
 
     def _positions(self):
-        """Dot centres in widget pixels; a fixed vertical spread so close values stay apart."""
+        """Dot centres in widget pixels, spread vertically so close values stay apart."""
         plot = QRectF(MARGIN, MARGIN, self.width() - 2 * MARGIN, self.height() - 2 * MARGIN - 14)
         x_max = self._x_max()
         rows = 5
@@ -83,7 +82,7 @@ class StripPlot(QWidget):
             else [])
         for i in order:
             color = QColor(VIEW_STYLES[self._styles[i]][0])
-            color.setAlpha(255)  # the outlines' colours, but not faint
+            color.setAlpha(255)
             painter.setPen(QPen(SELECTED_COLOR, 2) if i == self._selected else Qt.NoPen)
             painter.setBrush(color)
             radius = DOT_RADIUS + (1.5 if i == self._selected else 0)

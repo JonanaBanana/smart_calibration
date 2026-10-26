@@ -2,17 +2,14 @@
 """
 Synthetic calibration images with exact ground truth, for testing smart_calibration.
 
-A simulated camera (pinhole with plumb_bob distortion, or fisheye with equidistant distortion)
-views a board in random poses: a plain chessboard (completely visible) or an oversized radon
-checkerboard with three marker dots (larger than the view). For every supersampled pixel, the ray
-through the lens model is followed to the board plane and the board texture looked up there, so
-perspective and lens distortion are exact and the image is interpolated only once. Blur,
-vignetting and noise are added afterwards. ground_truth.json holds the camera, every board pose
-and the true pixel position and board coordinates of every inner corner.
+A simulated camera (pinhole/plumb_bob or fisheye/equidistant) views a plain chessboard or an
+oversized radon checkerboard with markers in random poses. Each supersampled pixel's ray is
+traced to the board plane, so perspective and distortion are exact; blur, vignetting and noise
+are added afterwards. ground_truth.json holds the camera, the board poses and every inner
+corner's true pixel position and board coordinates.
 
 The board drawing follows OpenCV's apps/pattern-tools/generate_pattern.py (Apache License 2.0,
-copyright the OpenCV authors, see THIRD_PARTY_NOTICES.md): same layout, colours, rounded outer
-squares of the radon checkerboard and marker dots, rasterised directly instead of written as SVG.
+copyright the OpenCV authors, see THIRD_PARTY_NOTICES.md).
 
 Usage (venv active, from the repository root):
     python utility/synthetic_dataset.py --output dataset/synthetic
@@ -27,14 +24,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# Board texture resolution; well above the camera's resolution on the board at the closest
-# distances used here.
+# Board texture resolution.
 PX_PER_MM = 6.0
 # Subsamples per pixel and axis when drawing curved shapes (rounded squares, marker dots).
 SHAPE_SUBSAMPLES = 4
-# Board distances (m) for both boards, so they are compared at the same distances. Poses that
-# break a board's visibility rule are drawn again: the chessboard must be completely visible,
-# so in practice it only appears from ~0.45 m on.
+# Board distances, metres.
 DISTANCE_RANGE_M = (0.3, 2.6)
 
 
@@ -70,12 +64,7 @@ class BoardSpec:
                          self.margin_mm + j * self.square_mm], -1).astype(np.float64)
 
     def board_coordinates(self):
-        """
-        (rows, cols, 2) board coordinates (x, y) of the inner corners, in squares.
-
-        As smart_calibration.detection.DetectedBoard: grid indices for a plain chessboard,
-        relative to the origin corner (top-left corner of origin_cell) for a marker board.
-        """
+        """(rows, cols, 2) board coordinates of the inner corners, as DetectedBoard's."""
         rows, cols = self.grid
         row, col = np.mgrid[0:rows, 0:cols]
         coordinates = np.stack([col, row], -1)
@@ -119,11 +108,9 @@ def _subsampled_fraction(x0_mm, y0_mm, x1_mm, y1_mm, inside):
 
 def draw_board(spec):
     """
-    Board texture as float32 (h, w), 0 = black, 1 = white; pixel u covers [u, u+1) / PX_PER_MM mm.
+    Board texture as float32 (h, w), 0 = black, 1 = white.
 
-    Squares get their exact pixel coverage; curved shapes (rounded outer squares of the radon
-    checkerboard, marker dots) are subsampled. Black squares where x % 2 == y % 2, as
-    generate_pattern.py.
+    Squares get their exact pixel coverage; curved shapes are subsampled.
     """
     width_mm, height_mm = spec.page_mm
     width, height = math.ceil(width_mm * PX_PER_MM), math.ceil(height_mm * PX_PER_MM)
@@ -210,13 +197,7 @@ class Camera:
 
 
 def make_camera(model, width=1280, height=720, fov_deg=90.0):
-    """
-    Camera with a horizontal field of view of fov_deg and moderate wide-angle distortion.
-
-    pinhole: f such that an ideal pinhole would see fov_deg; the barrel distortion widens the
-    actual view (to ~105 deg here). fisheye: f such that the image edge is at fov_deg / 2 off-axis.
-    The distortion stays monotonic over the whole image (no fold-over at the corners).
-    """
+    """Camera with a horizontal field of view of about fov_deg and wide-angle distortion."""
     half = math.radians(fov_deg) / 2
     if model == 'pinhole':
         D = np.array([-0.2, 0.04, 0.0005, -0.0005, 0.0])
@@ -244,12 +225,7 @@ def project(camera, points):
 
 
 def pixel_rays(camera, pixels):
-    """
-    Normalised ray directions (x, y), z = 1, through pixel positions (N, 2); NaN where invalid.
-
-    Inverts the lens model iteratively; a ray counts as valid if projecting it back lands within
-    1e-3 px of its pixel.
-    """
+    """Normalised ray directions (x, y), z = 1, through pixel positions (N, 2); NaN if none."""
     pixels = np.asarray(pixels, np.float64).reshape(-1, 1, 2)
     criteria = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)
     if camera.model == 'pinhole':
@@ -294,8 +270,7 @@ def render_board(rays, pyramid, spec, rotation, translation, levels, background)
     on_page = ((w > 0) & (bx_mm >= 0) & (bx_mm < width_mm) & (by_mm >= 0)
                & (by_mm < height_mm))  # w > 0: board in front of the camera (also excludes NaN)
 
-    # Texture coordinates (pixel centres at integers) at the mipmap level whose texels are about
-    # as large as a supersampled pixel (25th percentile over the page: sharp near side).
+    # Mipmap level whose texels are about as large as a supersampled pixel.
     u = np.where(on_page, bx_mm * PX_PER_MM - 0.5, -1).astype(np.float32)
     v = np.where(on_page, by_mm * PX_PER_MM - 0.5, -1).astype(np.float32)
     footprint = np.hypot(np.diff(u, axis=1), np.diff(v, axis=1))[on_page[:, 1:] & on_page[:, :-1]]
@@ -394,12 +369,7 @@ def sample_chessboard_pose(rng, camera, spec):
 
 
 def sample_marker_pose(rng, camera, spec):
-    """
-    A pose of the oversized board with the 7 x 7 corners around the marker L visible.
-
-    Rolls: mostly near level, some near 90 / 180 / 270 deg, some at 20-45 deg (tagged
-    'rotated': hard for findChessboardCornersSB with CALIB_CB_LARGER).
-    """
+    """A pose of the oversized board with the corners around the markers visible."""
     ox, oy = spec.origin_cell
     sq, margin = spec.square_mm, spec.margin_mm
     anchor = (margin + (ox + 1) * sq, margin + (oy + 1) * sq)  # centre of the marker L

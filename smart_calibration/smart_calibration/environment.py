@@ -4,8 +4,6 @@ import sys
 
 import cv2
 
-# Oldest OpenCV with the fixes this package relies on (see explore.md §5): calibration std-devs,
-# fisheye focal-length initialization, fisheye.solvePnP.
 MIN_OPENCV_VERSION = (4, 11)
 
 

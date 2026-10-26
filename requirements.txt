@@ -9,7 +9,7 @@
 # ROS Python packages (rclpy, sensor_msgs, cv_bridge, ...) are NOT installed here: they come
 # from sourcing /opt/ros/humble/setup.bash (PYTHONPATH). Verified working with this venv.
 #
-# Version rationale (see explore.md §5 and §6):
+# Version rationale:
 # - OpenCV 4.11 is the newest wheel that still supports numpy 1.x. 4.12+ requires numpy>=2,
 #   which breaks Humble's cv_bridge (compiled against the numpy 1.x C API).
 # - numpy 1.26.4: last numpy 1.x; the venv is isolated, so it must be pinned explicitly.

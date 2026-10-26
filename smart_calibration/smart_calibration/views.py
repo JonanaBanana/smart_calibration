@@ -1,10 +1,8 @@
 """
-Calibration views: the board detections kept for calibration, with their board geometry.
+Calibration views: the board detections kept for calibration.
 
-A view pairs the detected corners of one frame (image points, pixels) with the corners' positions
-on the flat board (object points, metres; z = 0), from the corners' board coordinates (see
-detection.DetectedBoard). With an oversized board, every view can show a different part of it.
-Only valid corners are used (see DetectedBoard.valid).
+A view pairs the valid detected corners of one frame (image points, pixels) with their positions
+on the flat board (object points, metres, z = 0).
 """
 
 from dataclasses import dataclass
@@ -12,25 +10,20 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-# Board speed needs two detections at most this far apart; after a longer gap (board lost,
-# frames dropped) the motion in between is unknown.
+# Longest gap between two detections over which the board speed is measured.
 MAX_SPEED_GAP_S = 0.5
-# Oversized boards: half size, in squares, of the board region around the origin whose outline
-# is compared between views (the visible part of such a board says little about its pose).
+# Oversized boards: half size, in squares, of the region around the origin used as outline.
 MARKER_REFERENCE_HALF_SIZE = 3
-# Corner check: neighbours within this many squares predict a corner; a corner needs at least
-# RESIDUAL_MIN_NEIGHBOURS valid ones to be checked (a quadratic surface has 6 coefficients).
+# Corner check: neighbours within this many squares, and at least this many of them.
 RESIDUAL_REACH = 3
 RESIDUAL_MIN_NEIGHBOURS = 8
 
 
 def object_points(board, square_size):
     """
-    Return the valid corners' positions on the board plane as an (N, 1, 3) float32 array.
+    Return the valid corners' positions on the board plane, (N, 1, 3) float32, row-major.
 
-    Row-major like the detections: board coordinates (squares) times square_size, z = 0. float32
-    in the (N, 1, 3) shape is the format both calibration functions accept: cv2.calibrateCamera
-    rejects float64, cv2.fisheye.calibrate rejects (N, 3) arrays (OpenCV 4.11).
+    This shape and type are what both cv2.calibrateCamera and cv2.fisheye.calibrate accept.
     """
     coordinates = board.board_coordinates()[board.valid]
     points = np.zeros((len(coordinates), 1, 3), np.float32)
@@ -45,11 +38,9 @@ def image_points(board):
 
 def reference_outline(mode, cols, rows):
     """
-    Board coordinates (4, 2) of the board region whose outline is compared between views.
+    Return the board coordinates (4, 2) of the outline compared between views.
 
-    'chessboard': the four outermost inner corners of a cols x rows board. 'oversized_marker':
-    a square of 2 * MARKER_REFERENCE_HALF_SIZE squares around the origin, the same physical
-    region in every view whichever part of the board is visible.
+    'chessboard': the four outermost inner corners. 'oversized_marker': a square around the origin.
     """
     if mode == 'oversized_marker':
         half = MARKER_REFERENCE_HALF_SIZE
@@ -59,11 +50,9 @@ def reference_outline(mode, cols, rows):
 
 def board_outline(board, reference):
     """
-    Return the image positions (4, 2) of the reference board coordinates (see reference_outline).
+    Return the image positions (4, 2) of the reference board coordinates.
 
-    A detected corner is used where the board has a valid one; other points are projected with
-    the homography from board coordinates to the image, fitted to the valid corners (approximate
-    under lens distortion, which is good enough to compare views).
+    Points without a valid detected corner are projected with a homography fitted to the corners.
     """
     rows, cols = board.shape
     outline = np.zeros((len(reference), 2))
@@ -83,11 +72,7 @@ def board_outline(board, reference):
 
 
 def common_corners(board, other):
-    """
-    Return the valid corners of two boards with the same board coordinates, as two (n, 2) arrays.
-
-    The detected grids are rectangles in board coordinates, so their common part is one too.
-    """
+    """Return the valid corners of two boards with the same board coordinates, (n, 2) each."""
     (rows, cols), (other_rows, other_cols) = board.shape, other.shape
     (row0, col0), (other_row0, other_col0) = board.origin, other.origin
     x_low, x_high = max(-col0, -other_col0), min(cols - col0, other_cols - other_col0)
@@ -103,12 +88,10 @@ def common_corners(board, other):
 
 def board_speed(board, stamp, previous, previous_stamp):
     """
-    Mean corner movement in pixels per second between two detections of the same board.
+    Return the mean corner movement in pixels per second between two detections.
 
-    Valid corners are matched by board coordinates. A plain chessboard (not oriented) may be
-    numbered from the opposite end in the next frame, so for it the 180 degree turned numbering is
-    compared too and the smaller movement used. Returns None if the time between the detections
-    is not in (0, MAX_SPEED_GAP_S] or the two have no valid corner in common.
+    A plain chessboard is also compared with its numbering turned by 180 degrees. None if the
+    detections are more than MAX_SPEED_GAP_S apart or have no valid corner in common.
     """
     elapsed = stamp - previous_stamp
     if not 0.0 < elapsed <= MAX_SPEED_GAP_S:
@@ -141,21 +124,17 @@ def _quadratic_terms(x, y):
 
 def corner_residuals(board):
     """
-    (rows, cols) distance of each valid corner from where its neighbours put it, in squares.
+    Return each corner's distance from where its neighbours put it, (rows, cols), in squares.
 
-    For every valid corner, a quadratic surface (pixel position as a function of grid position)
-    is fitted to the valid corners within RESIDUAL_REACH squares, the corner itself left out, and
-    the corner's distance to the surface's prediction divided by the local square size (from the
-    same surface). The surface follows perspective and lens distortion over a few squares, so
-    correct corners stay close to it (below ~0.06 squares on synthetic views); a misplaced corner,
-    including one at the edge of the grid, or an unevenly deformed region stands out. NaN for
-    invalid corners and corners with fewer than RESIDUAL_MIN_NEIGHBOURS valid neighbours.
+    A quadratic surface (pixel position over grid position) is fitted to the valid corners within
+    RESIDUAL_REACH squares, leaving the corner out. NaN for invalid corners and corners with
+    fewer than RESIDUAL_MIN_NEIGHBOURS valid neighbours.
     """
     corners = board.corners.astype(np.float64)
     rows, cols = board.shape
     row_index, col_index = np.mgrid[0:rows, 0:cols]
     residuals = np.full((rows, cols), np.nan)
-    at_corner = _quadratic_terms([0, 1, 0], [0, 0, 1])  # the corner and its next neighbours
+    at_corner = _quadratic_terms([0, 1, 0], [0, 0, 1])  # the corner and two neighbours
     for row, col in zip(*np.nonzero(board.valid)):
         near = (board.valid & (np.abs(row_index - row) <= RESIDUAL_REACH)
                 & (np.abs(col_index - col) <= RESIDUAL_REACH))
@@ -173,11 +152,9 @@ def corner_residuals(board):
 
 def outline_distance(outline, other, numbering_may_flip):
     """
-    Mean distance in pixels between the corresponding corners of two board outlines.
+    Return the mean distance in pixels between the corresponding corners of two outlines.
 
-    Changes with the board's position, size (distance to the camera), tilt and rotation. If the
-    board's numbering may start from the opposite end (plain chessboard), the outline order is
-    shifted by two as well and the smaller distance is used.
+    numbering_may_flip: also compare with the outline turned by 180 degrees, take the smaller.
     """
     candidates = (other, np.roll(other, 2, axis=0)) if numbering_may_flip else (other,)
     return float(min(np.linalg.norm(outline - candidate, axis=-1).mean()
@@ -185,23 +162,12 @@ def outline_distance(outline, other, numbering_may_flip):
 
 
 def outline_size(outline):
-    """
-    Size of a board outline in the image: its mean side length in pixels.
-
-    Unlike the area, it stays large for a strongly tilted board (the sides along the tilt axis
-    keep their length).
-    """
+    """Return the mean side length of a board outline, in pixels."""
     return float(np.linalg.norm(outline - np.roll(outline, 1, axis=0), axis=-1).mean())
 
 
 def relative_outline_distance(outline, other, numbering_may_flip):
-    """
-    Distance between two board outlines in board sizes: outline_distance / mean outline_size.
-
-    The same board movement (shifted by half its size, turned, tilted) gives the same value near
-    the camera and far from it, where the pixel distance would be much smaller. The size of both
-    outlines is used so the distance is symmetric, also between a near and a far view.
-    """
+    """Return the distance between two outlines in board sizes (mean size of both)."""
     size = (outline_size(outline) + outline_size(other)) / 2
     return outline_distance(outline, other, numbering_may_flip) / size
 
@@ -221,12 +187,9 @@ class View:
 @dataclass(frozen=True)
 class Assessment:
     """
-    The checks of one detection: each measured value and whether it passed.
+    The checks of one detection: each value and whether it passed.
 
-    A value is None when it cannot be measured (speed: first detection, after a gap or without
-    common corners; residual: no corner has enough valid neighbours; distance: no view kept yet,
-    or a different image size); its verdict is then None too, except that the first view always
-    passes the distance check. view is the kept View, or None.
+    None where a value cannot be measured. view: the kept View, or None.
     """
 
     speed: float            # board speed, pixels per second (board_speed)
@@ -239,10 +202,10 @@ class Assessment:
 
 
 class ViewCollection:
-    """The views kept for calibration, in memory. Not thread-safe: the caller locks."""
+    """The views kept for calibration. Not thread-safe."""
 
     def __init__(self, square_size, reference):
-        """Keep views of a board with the given square size (reference: see reference_outline)."""
+        """Collect views of a board with this square size; reference: see reference_outline."""
         self.square_size = square_size
         self.reference = np.asarray(reference)
         self.views = []
@@ -259,18 +222,11 @@ class ViewCollection:
     def consider(self, board, image_size, stamp, max_speed, max_residual, min_distance,
                  keep=True):
         """
-        Run all checks on a detection and keep it as a view if it passes them; return Assessment.
+        Check a detection and keep it as a view if it passes; return an Assessment.
 
-        board: DetectedBoard, to be passed for every detection (consecutive detections give the
-        board speed). Kept are detections whose board moved at most max_speed pixels per second
-        since the previous detection (motion blur, rolling shutter), none of whose valid corners
-        is further than max_residual squares from where its neighbours put it (corner_residuals:
-        a misplaced corner or a deformed region discards the whole frame), and whose board outline
-        differs from every kept view by at least min_distance board sizes (nearest_view_distance,
-        relative_outline_distance), in the
-        same image size as the views so far. All checks are evaluated even if an earlier one
-        fails, so all values can be shown. Only valid corners go into the view. keep=False:
-        evaluate only (collection stopped), never keep.
+        Pass every detection: consecutive ones give the board speed. Kept if the board moved at
+        most max_speed px/s, no corner residual exceeds max_residual and the outline is at least
+        min_distance board sizes from every kept view. keep=False: check only.
         """
         image_size = tuple(image_size)
         previous, self._previous = self._previous, (stamp, board)
@@ -289,7 +245,7 @@ class ViewCollection:
         distance, distance_ok = None, None
         if not self.views:
             distance_ok = True  # the first view is always new
-        elif image_size == self.image_size:  # intrinsics are only valid for one resolution
+        elif image_size == self.image_size:
             distance = self.nearest_view_distance(outline, not board.oriented)
             distance_ok = distance >= min_distance
 
@@ -301,12 +257,12 @@ class ViewCollection:
         return Assessment(speed, speed_ok, residual, residual_ok, distance, distance_ok, view)
 
     def nearest_view_distance(self, outline, numbering_may_flip):
-        """Distance of a board outline to the nearest kept view's, in board sizes."""
+        """Return the distance of an outline to the nearest kept view's, in board sizes."""
         return min(relative_outline_distance(outline, kept.outline, numbering_may_flip)
                    for kept in self.views)
 
     def remove(self, indices):
-        """Remove the views at these indices (into views)."""
+        """Remove the views at these indices."""
         gone = set(indices)
         self.views = [view for i, view in enumerate(self.views) if i not in gone]
 

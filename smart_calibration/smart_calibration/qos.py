@@ -21,10 +21,8 @@ def image_qos(node, topic, mode='auto', discovery_timeout_s=2.0):
     """
     Return a QoS profile for subscribing to the camera images on topic.
 
-    Best effort loses many large images in transport (each image is split into many fragments,
-    and losing one drops the whole image: ~16 of 30 fps arrived in a 1280x720 mono8 test), but a
-    reliable subscription cannot connect to a best-effort publisher. 'auto' therefore matches the
-    reliability of the topic's current publishers, like ROS camera_calibration does.
+    'auto' matches the reliability of the topic's publishers: best effort drops many large
+    images, and a reliable subscription cannot connect to a best-effort publisher.
     """
     if mode not in IMAGE_QOS_MODES:
         raise ValueError(f'image_qos must be one of {IMAGE_QOS_MODES}, got {mode!r}')
@@ -32,7 +30,6 @@ def image_qos(node, topic, mode='auto', discovery_timeout_s=2.0):
     reliability = {'reliable': ReliabilityPolicy.RELIABLE,
                    'best_effort': ReliabilityPolicy.BEST_EFFORT}.get(mode)
     if reliability is None:
-        # Right after the node starts, discovery may not have found the publishers yet.
         publishers = wait_for_publishers(node, topic, discovery_timeout_s)
         if not publishers:
             reliability = ReliabilityPolicy.BEST_EFFORT  # connects to any publisher
@@ -45,5 +42,4 @@ def image_qos(node, topic, mode='auto', discovery_timeout_s=2.0):
         else:
             reliability = ReliabilityPolicy.BEST_EFFORT
 
-    # Shallow queue: only the newest frames matter.
     return QoSProfile(depth=2, reliability=reliability)

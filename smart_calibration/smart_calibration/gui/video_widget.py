@@ -1,18 +1,13 @@
-"""
-Camera image with vector overlays.
-
-The detected chessboard, an uncertainty map, and for the final calibration pass the outlines of
-the kept views and the corner errors of one view.
-"""
+"""Camera image with overlays: board, uncertainty map, view outlines and corner errors."""
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
-CORNER_RADIUS_PX = 4.0  # on screen, independent of zoom
+CORNER_RADIUS_PX = 4.0  # on screen
 
-# Status box (top left): text colour per line state.
+# Status box text colour per line state.
 STATUS_COLORS = {
     'pass': QColor(90, 220, 90),
     'fail': QColor(255, 90, 80),
@@ -20,18 +15,16 @@ STATUS_COLORS = {
     'unknown': QColor(150, 150, 150),
     'kept': QColor(80, 200, 255),
 }
-# Value column wide enough for these, so the box keeps its size from frame to frame.
+# Value column wide enough for these, so the box keeps its size.
 STATUS_VALUE_WIDTHS = ('not found', '00000 px/s', 'kept #000')
 
-# Uncertainty map colours (fixed scale, so "good" looks the same every time): green at
-# MAP_GOOD_PX and below, yellow in between (logarithmic), red at MAP_BAD_PX and above.
+# Uncertainty map colours: green up to MAP_GOOD_PX, red from MAP_BAD_PX (logarithmic).
 MAP_GOOD_PX = 0.25
 MAP_BAD_PX = 2.0
 MAP_ALPHA = 110
 MAP_COLORS = np.array([[0, 200, 0], [255, 220, 0], [255, 40, 40]], np.float64)
 
-# Final pass view outlines: (colour, width, dashed) per style.
-# Kept views are many and only context: faint. The flagged ones should stand out.
+# View outlines: (colour, width, dashed) per style.
 VIEW_STYLES = {
     'kept': (QColor(90, 220, 90, 70), 1.5, False),
     'removed': (QColor(255, 80, 70, 200), 2.5, True),
@@ -39,16 +32,15 @@ VIEW_STYLES = {
     'restored': (QColor(80, 200, 255, 160), 2.0, False),
 }
 SELECTED_COLOR = QColor(255, 255, 255)
-# Undistorted view: where the lens model folds over (beyond it nothing valid can be shown).
+# Where the lens model folds over, in the undistorted view.
 BOUNDARY_COLOR = QColor(255, 200, 60, 200)
-# Corner errors: a line of fixed length (screen pixels) in the error's direction, coloured by its
-# size and labelled with it (largest errors first, as many labels as fit without overlapping).
+# Corner errors: fixed-length lines (screen pixels) in the error's direction.
 ERROR_LINE_PX = 14.0
 DIM_ALPHA = 150
 
 
 def uncertainty_colors(values):
-    """(rows, cols, 4) uint8 RGBA for an uncertainty map in px; NaN cells transparent."""
+    """Return (rows, cols, 4) RGBA colours for an uncertainty map in px; NaN transparent."""
     values = np.asarray(values, np.float64)
     valid = np.isfinite(values)
     position = np.zeros_like(values)
@@ -64,36 +56,36 @@ def uncertainty_colors(values):
 
 
 def to_qimage(image):
-    """Wrap a uint8 (h, w) gray or (h, w, 3) RGB array in a QImage without copying it."""
+    """Wrap a uint8 (h, w) gray or (h, w, 3) RGB array in a QImage without copying."""
     height, width = image.shape[:2]
     image_format = QImage.Format_Grayscale8 if image.ndim == 2 else QImage.Format_RGB888
     return QImage(image.data, width, height, image.strides[0], image_format)
 
 
 def cosmetic_pen(color, width):
-    """Pen whose width is in screen pixels, regardless of the painter's scale."""
+    """Return a pen whose width is in screen pixels."""
     pen = QPen(color, width)
     pen.setCosmetic(True)
     return pen
 
 
 class VideoWidget(QWidget):
-    """Shows an image scaled to fit (aspect ratio kept) with the board drawn on top."""
+    """An image scaled to fit, with overlays."""
 
-    # A click on the image, in the coordinates of the view outlines (see set_views).
+    # A click on the image, in the coordinates of the view outlines.
     image_clicked = Signal(float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(320, 240)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._image = None  # numpy array backing _qimage; must stay alive while it is shown
+        self._image = None  # numpy array backing _qimage
         self._qimage = None
         self._corners = None  # (rows, cols, 2) corner positions, or None
-        self._corners_width = None  # width of the image the corner coordinates refer to
+        self._corners_width = None  # width of the image the corners refer to
         self._message = 'waiting for images'
         self._status = None
-        self._origin = None  # (row, col) of the board origin in the corner grid, or None
+        self._origin = None  # (row, col) of the board origin, or None
         self._map = None  # RGBA array backing _map_image
         self._map_image = None
         self._dimmed = False
@@ -105,13 +97,10 @@ class VideoWidget(QWidget):
     def set_frame(self, image, corners=None, message=None, corners_width=None, status=None,
                   origin=None):
         """
-        Show image, optionally with a board overlay and a status box.
+        Show an image, optionally with the board and a status box.
 
-        corners are in the pixel coordinates of an image corners_width pixels wide (default: the
-        shown image), so they can refer to the full-resolution camera image while a downscaled
-        preview of it is shown. status: lines (label, value, mark, state) for the status box in
-        the top left corner, state being a key of STATUS_COLORS. origin: (row, col) in corners
-        of the board origin, marked with a ring.
+        corners: in the pixels of an image corners_width wide (default: this image). status:
+        lines (label, value, mark, STATUS_COLORS key). origin: (row, col) in corners, ringed.
         """
         self._image = np.ascontiguousarray(image)
         self._qimage = to_qimage(self._image)
@@ -123,18 +112,13 @@ class VideoWidget(QWidget):
         self.update()
 
     def set_message(self, message):
-        """Show a message instead of the status box (over the last image)."""
+        """Show a message instead of the status box, over the last image."""
         self._message = message
         self._status = None
         self.update()
 
     def set_uncertainty_map(self, values):
-        """
-        Show an uncertainty map (rows, cols) in px over the image, or none (None).
-
-        Its cells divide the image evenly, so it is stretched over the shown image whatever its
-        resolution.
-        """
+        """Show an uncertainty map (rows, cols) in px stretched over the image, or None."""
         if values is None:
             self._map, self._map_image = None, None
         else:
@@ -145,40 +129,31 @@ class VideoWidget(QWidget):
         self.update()
 
     def set_dimmed(self, dimmed):
-        """Darken the image (as a background for the final pass's view outlines)."""
+        """Darken the image."""
         self._dimmed = dimmed
         self.update()
 
     def set_views(self, outlines, styles, selected, width):
         """
-        Draw view outlines: (k, 2) polygons in the pixels of an image width wide (or None).
+        Draw view outlines, (k, 2) polygons in the pixels of an image width wide, or None.
 
-        styles: a VIEW_STYLES key per outline; selected: index of the outline drawn highlighted,
-        or None.
+        styles: a VIEW_STYLES key per outline; selected: index highlighted, or None.
         """
         self._views = None if outlines is None else (outlines, styles, selected, width)
         self.update()
 
     def set_arrows(self, points, residuals, width):
-        """
-        Draw corner errors at points (N, 2): residuals (N, 2) as direction, colour and label.
-
-        Coordinates in the pixels of an image width wide; points None: none.
-        """
+        """Draw corner errors (N, 2) at points (N, 2) of an image width wide; points None: none."""
         self._arrows = None if points is None else (points, residuals, width)
         self.update()
 
     def set_boundary(self, polygon, width):
-        """
-        Draw where the lens model is valid: a closed dashed line, or none (polygon None).
-
-        polygon (k, 2) in the pixels of an image width wide.
-        """
+        """Draw a dashed boundary, (k, 2) in the pixels of an image width wide, or None."""
         self._boundary = None if polygon is None else (polygon, width)
         self.update()
 
     def set_error_labels(self, shown):
-        """Label the corner errors (see set_arrows) with their size, or not."""
+        """Label the corner errors with their size, or not."""
         self._error_labels_shown = shown
         self.update()
 
@@ -192,7 +167,7 @@ class VideoWidget(QWidget):
                                 (position.y() - target.top()) / scale - 0.5)
 
     def image_rect(self):
-        """Widget area the image is drawn into."""
+        """Return the widget area the image is drawn into."""
         scale = min(self.width() / self._qimage.width(), self.height() / self._qimage.height())
         width, height = self._qimage.width() * scale, self._qimage.height() * scale
         return QRectF((self.width() - width) / 2, (self.height() - height) / 2, width, height)
@@ -207,7 +182,6 @@ class VideoWidget(QWidget):
             if self._dimmed:
                 painter.fillRect(target, QColor(0, 0, 0, DIM_ALPHA))
             if self._map_image is not None:
-                # Smooth scaling blends the cells into a continuous map.
                 painter.drawImage(target, self._map_image)
                 self._draw_map_legend(painter, target)
             if self._boundary is not None:
@@ -234,7 +208,7 @@ class VideoWidget(QWidget):
         # OpenCV puts pixel centres at integer coordinates, Qt at +0.5.
         painter.translate(0.5, 0.5)
 
-        # Corners not used by the calibration node are NaN: they are left out (gaps in the rows).
+        # Unused corners are NaN: gaps in the rows.
         rows, cols = self._corners.shape[:2]
         outline = np.array([self._corners[0, 0], self._corners[0, -1],
                             self._corners[-1, -1], self._corners[-1, 0]])
@@ -245,7 +219,7 @@ class VideoWidget(QWidget):
 
         radius = CORNER_RADIUS_PX / scale
         for row in range(rows):
-            # One colour per row (like cv2.drawChessboardCorners), so the orientation is visible.
+            # One colour per row, like cv2.drawChessboardCorners.
             color = QColor.fromHsvF(0.8 * row / max(rows - 1, 1), 1.0, 1.0)
             painter.setPen(cosmetic_pen(color, 2))
             line = []
@@ -269,12 +243,12 @@ class VideoWidget(QWidget):
         painter.restore()
 
     def _image_painter(self, painter, target, width):
-        """Set painter up for drawing in the pixels of an image width wide (call save first)."""
+        """Set the painter up for the pixels of an image width wide; call save() first."""
         painter.setRenderHint(QPainter.Antialiasing)
         scale = target.width() / width
         painter.translate(target.topLeft())
         painter.scale(scale, scale)
-        painter.translate(0.5, 0.5)  # OpenCV puts pixel centres at integer coordinates, Qt at +0.5
+        painter.translate(0.5, 0.5)  # OpenCV pixel centres are at integers, Qt's at +0.5
         return scale
 
     def _draw_boundary(self, painter, target):
@@ -307,10 +281,9 @@ class VideoWidget(QWidget):
         painter.restore()
 
     def _draw_arrows(self, painter, target):
-        """Corner errors, in screen pixels: fixed-length lines, colour and label by size."""
+        """Draw the corner errors in screen pixels."""
         points, residuals, width = self._arrows
         scale = target.width() / width
-        # Pixel centres at integers in OpenCV, at +0.5 in Qt.
         screen = (np.asarray(points, np.float64) + 0.5) * scale + [target.left(), target.top()]
         sizes = np.hypot(residuals[:, 0], residuals[:, 1])
         painter.save()
@@ -321,7 +294,6 @@ class VideoWidget(QWidget):
         metrics = painter.fontMetrics()
         labels = (self._error_labels(screen, residuals, sizes, metrics)
                   if self._error_labels_shown else {})
-        # Coloured like the map: green below MAP_GOOD_PX, red from MAP_BAD_PX.
         colors = uncertainty_colors(sizes)
         for i, ((x, y), (dx, dy), size) in enumerate(zip(screen, residuals, sizes)):
             r, g, b, _ = colors[i]
@@ -340,11 +312,7 @@ class VideoWidget(QWidget):
 
     @staticmethod
     def _error_labels(screen, residuals, sizes, metrics):
-        """
-        {corner index: label box} in screen pixels: largest errors first, none overlapping.
-
-        Each label sits opposite its line, so the two do not overlap.
-        """
+        """Return {corner index: label box}: largest errors first, none overlapping."""
         placed = {}
         for i in np.argsort(sizes)[::-1]:
             (x, y), (dx, dy), size = screen[i], residuals[i], sizes[i]
@@ -357,7 +325,7 @@ class VideoWidget(QWidget):
         return placed
 
     def _draw_map_legend(self, painter, target):
-        """Colour scale of the uncertainty map in the bottom right corner of the image."""
+        """Draw the uncertainty map's colour scale in the bottom right corner."""
         painter.save()
         font = painter.font()
         font.setPointSize(9)

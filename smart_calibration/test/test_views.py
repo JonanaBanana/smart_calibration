@@ -180,7 +180,7 @@ def test_corner_residuals_ignore_distortion_and_perspective():
 
 
 def test_corner_residuals_find_a_misplaced_corner_anywhere_in_the_grid():
-    # Also at the grid's edge and corner, where a check along rows / columns sees it least.
+    # Also at the grid's edge and corner.
     for rotation, translation in POSES:
         for row, col in ((3, 2), (0, 3), (0, 0), (6, 5)):
             grid = projected_grid(rotation, translation)

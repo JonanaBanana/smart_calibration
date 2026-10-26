@@ -1,19 +1,35 @@
 """
-Preprocessing of single-channel camera images into the 8-bit image used for detection.
+Conversion of single-channel camera images to 8 bit, for detection and for display.
 
-Tone mapping: contrast stretch between two intensity percentiles, then gamma, then an optional
-S-shaped contrast curve. All steps are monotonic per pixel, so they do not move chessboard
-corners (saddle points of the intensity); a very strong S-curve approaches a hard threshold,
-though, which removes the grey transitions that sub-pixel corner positions are computed from.
+preprocess: contrast stretch between two intensity percentiles, gamma, then an optional S-shaped
+contrast curve. All steps are monotonic, so they do not move chessboard corners.
 """
 
 import numpy as np
 
-# For large images, percentiles are estimated on every n-th pixel in both directions, which is
-# plenty for an intensity distribution and keeps the cost at a fraction of a millisecond.
+# Encodings converted at their own bit depth: cv_bridge's mono8 conversion would leave
+# 10/12-bit sensors nearly black.
+SIXTEEN_BIT_ENCODINGS = {'mono16', '16UC1', 'bgr16', 'rgb16', 'bgra16', 'rgba16'}
+FLOAT_MONO_ENCODINGS = {'32FC1', '64FC1'}
+
+# Percentiles of large images are estimated on every n-th pixel in both directions.
 PERCENTILE_SUBSAMPLE = 4
 SUBSAMPLE_MIN_PIXELS = 100_000
 HISTOGRAM_BINS = 256
+
+
+def to_mono8(image):
+    """Convert a single-channel image to uint8 scaled by its maximum; NaN, inf, < 0 map to 0."""
+    if image.ndim != 2:
+        raise ValueError(f'expected a single-channel image, got shape {image.shape}')
+    if image.dtype == np.uint8:
+        return image
+
+    image = np.nan_to_num(image.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    max_value = float(image.max())
+    if max_value <= 0.0:
+        return np.zeros(image.shape, dtype=np.uint8)
+    return np.clip(np.rint(image * (255.0 / max_value)), 0, 255).astype(np.uint8)
 
 
 def stretch_limits(image, low_percentile, high_percentile):
@@ -30,11 +46,7 @@ def stretch_limits(image, low_percentile, high_percentile):
 
 
 def gamma_curve(values, low, high, gamma):
-    """
-    Map intensities to 0-1: linear stretch of [low, high] to [0, 1], then gamma.
-
-    gamma > 1 brightens dark regions, gamma < 1 darkens bright ones (output = input^(1/gamma)).
-    """
+    """Map [low, high] linearly to [0, 1], then apply gamma (> 1 brightens dark regions)."""
     if high <= low:
         return np.zeros(np.shape(values), dtype=np.float32)
     normalized = np.clip((np.asarray(values, dtype=np.float32) - low) / (high - low), 0.0, 1.0)
@@ -42,12 +54,7 @@ def gamma_curve(values, low, high, gamma):
 
 
 def lower_half_s(t, strength):
-    """
-    Lower half of a symmetric S-curve, scaled to map [0, 1] onto [0, 1].
-
-    The S-curve is a sigmoid around 0.5 (tanh form of the logistic), rescaled to keep 0 and 1;
-    its lower half (convex, slope strength / (4 tanh(strength / 4)) at t = 1) is returned.
-    """
+    """Lower half of a tanh S-curve, scaled to map [0, 1] onto [0, 1]."""
     half_range = np.tanh(strength / 4.0)
     return (np.tanh(strength * (t - 1.0) / 4.0) + half_range) / half_range
 
@@ -56,11 +63,7 @@ def s_curve(values, strength, midpoint):
     """
     S-shaped contrast curve on 0-1 values that keeps 0, midpoint and 1 fixed.
 
-    Values below midpoint get darker, values above it lighter; strength sets how steep the
-    curve is (0: unchanged). Below the midpoint, the lower half of a symmetric S-curve is
-    scaled onto [0, midpoint]; above it, the mirrored half onto [midpoint, 1]. Both sides are
-    scaled equally in x and y, so the slope at the midpoint depends on strength only, and the
-    curve for midpoint m is the mirror image of the one for 1 - m.
+    Values below the midpoint get darker, above it lighter; strength sets the steepness (0: off).
     """
     values = np.clip(np.asarray(values, dtype=np.float64), 0.0, 1.0)
     if strength <= 0.0:
@@ -87,10 +90,7 @@ def preprocess_with_histograms(image, low_percentile=0.5, high_percentile=99.5, 
     """
     Convert a single-channel image (uint8, uint16 or float) to the uint8 detection image.
 
-    Returns (image, histogram_before, histogram_after): 256-bin histograms (over 0-1) of the
-    image before the contrast curve (after stretch and gamma) and of the final image. Integer
-    images use one lookup table, and their histograms are derived from the input histogram, so
-    no extra pass over the image is needed. NaN/inf in float images map to 0.
+    Returns (image, histogram before the contrast curve, histogram after it), 256 bins each.
     """
     if image.ndim != 2:
         raise ValueError(f'expected a single-channel image, got shape {image.shape}')
@@ -115,7 +115,7 @@ def preprocess_with_histograms(image, low_percentile=0.5, high_percentile=99.5, 
 
 def preprocess(image, low_percentile=0.5, high_percentile=99.5, gamma=1.0,
                contrast_strength=0.0, contrast_midpoint=0.5):
-    """Convert a single-channel image to the uint8 detection image (see above)."""
+    """Convert a single-channel image to the uint8 detection image."""
     if image.ndim != 2:
         raise ValueError(f'expected a single-channel image, got shape {image.shape}')
     low, high = stretch_limits(image, low_percentile, high_percentile)

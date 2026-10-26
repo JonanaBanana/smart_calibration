@@ -73,8 +73,7 @@ def board_view(texture, scale, angle_deg, tilt=(0.0, 0.0), size=(960, 720)):
 
 def test_marker_board_coordinates_are_the_same_physical_corners_in_every_view():
     texture = render_marker_board(ONE_ORIGIN)
-    # In-plane rotations around 30-45 degrees are not detected reliably with CALIB_CB_LARGER
-    # (the detected grid must be a complete rectangle of corners inside the image).
+    # In-plane rotations of 30-45 degrees are not detected reliably with CALIB_CB_LARGER.
     for scale, angle, tilt in ((2.5, 0, (0, 0)), (2.5, 90, (0, 0)), (2.5, 180, (0, 0)),
                                (2.0, 20, (0, 0)), (2.3, -15, (0.0005, -0.0003))):
         image, homography = board_view(texture, scale, angle, tilt)

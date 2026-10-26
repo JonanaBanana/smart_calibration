@@ -9,9 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # Calibration node and GUI on the same machine. Activate the package venv before launching
-    # (see README.md). To run the GUI on another machine, use calibration.launch.py and
-    # gui.launch.py separately.
+    # Calibration node and GUI on one machine. Activate the package venv before launching.
     launch_dir = os.path.join(get_package_share_directory('smart_calibration'), 'launch')
 
     def include(launch_file, arguments):

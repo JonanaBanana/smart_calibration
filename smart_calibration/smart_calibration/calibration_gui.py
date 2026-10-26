@@ -11,7 +11,7 @@ def main(args=None):
         rclpy.logging.get_logger('calibration_gui').fatal(error)
         sys.exit(1)
 
-    # Imported only after the check: PySide6 exists only in the package venv.
+    # PySide6 is only installed in the venv.
     from smart_calibration.gui.app import run
     run(args)
 

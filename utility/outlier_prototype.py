@@ -2,28 +2,15 @@
 """
 Prototype: which views should the final calibration pass remove? (pinhole, plumb_bob)
 
-Uses the views of a synthetic dataset that pass the calibration node's checks (cached by
-uncertainty_prototype.py) and corrupts a few of them in ways those per-frame checks cannot see:
-smooth over the board, or consistent within the frame but not with the other views.
+Corrupts a few synthetic views in ways the per-frame checks cannot see, and compares how well
+three scores find them (robust z-score above --z): reprojection error, exact leave-one-out error
+and its linearized approximation.
 
-  bend     rows bowed (a board flexing), up to amp px in the middle
-  shear    x shifted proportionally to y (rolling shutter while moving), +-amp px at the ends
-  scale    zoomed about the image centre (focus or temperature changed), amp px at the furthest
-           corner
-  patch    the corners within one square of a random corner shifted by amp px (a local glitch)
-  origin   object points shifted by one square (wrong marker origin; marker board only)
-
-Three scores per view, each turned into a robust z-score against all views (median, MAD):
-
-  rms      reprojection error in the calibration from all views
-  exact    leave-one-out: calibrate without the view, fit only its pose (solvePnP), its
-           reprojection error; one calibration per view
-  approx   the same, linearized: one Gauss-Newton step from the full solution with the view's
-           normal-equation contribution taken out (the Schur-reduced form the covariance in
-           smart_calibration.calibration uses), pose re-fitted by projection; milliseconds
-
-A score flags a view when its z-score exceeds --z. A good score flags no view on clean data and
-the corrupted views when they matter.
+  bend     rows bowed (a flexing board), up to amp px
+  shear    x shifted proportionally to y (rolling shutter), +-amp px
+  scale    zoomed about the image centre, amp px at the furthest corner
+  patch    the corners around one corner shifted by amp px
+  origin   object points shifted by one square (marker board only)
 
 Usage (venv active, from the repository root; run uncertainty_prototype.py once first):
     python utility/outlier_prototype.py dataset/synthetic [--views 40] [--trials 5]
@@ -119,12 +106,7 @@ def exact_loo(objects, images, fix_k3):
 
 
 def remove_outliers(objects, images, z, max_fraction=0.1):
-    """
-    Remove the worst view while its approx leave-one-out z-score exceeds z; return kept indices.
-
-    One at a time with a recalibration in between (a bad view also raises the others' errors);
-    at most max_fraction of the views.
-    """
+    """Remove the worst view while its z-score exceeds z, recalibrating; return kept indices."""
     keep = list(range(len(objects)))
     while len(keep) > (1 - max_fraction) * len(objects):
         result, _, _ = scores([objects[i] for i in keep], [images[i] for i in keep], False)

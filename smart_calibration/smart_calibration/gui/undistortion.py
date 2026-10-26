@@ -1,16 +1,8 @@
 """
-Undistortion of what the GUI shows: images of any size and points in full image pixels.
+Undistortion of images of any size and of points in full image pixels (plumb_bob).
 
-Pinhole model (plumb_bob). The undistorted view uses cv2.getOptimalNewCameraMatrix: alpha 0 shows
-only valid pixels (cropped), alpha 1 the whole image (curved black borders). Images of other sizes
-than the calibrated one (preview, thumbnails, the uncertainty map grid) cover the same field of
-view, so the camera matrices are scaled to them.
-
-Beyond the corners it was fitted to, the radial polynomial r (1 + k1 r^2 + k2 r^4 + k3 r^6) can
-reach a maximum and turn back (fold over): rays further out land inside the image again, and an
-undistorted view would show the image a second time, mirrored, as a ring. The view is black beyond
-that radius (fold_radius; the tangential terms are left out, they are tiny), and fold_outline()
-gives the boundary for drawing.
+alpha 0 shows only valid pixels, alpha 1 the whole image (cv2.getOptimalNewCameraMatrix). Beyond
+the radius where the distortion model folds over (calibration.fold_radius) the view is black.
 """
 
 import cv2
@@ -18,8 +10,7 @@ import numpy as np
 
 from smart_calibration.calibration import fold_radius
 
-# A new camera matrix whose focal length differs more than this factor from the calibrated one
-# means getOptimalNewCameraMatrix failed (e.g. the model folds over at the image corners).
+# Larger zoom factors from getOptimalNewCameraMatrix are treated as failures.
 MAX_ZOOM = 5.0
 _UNDISTORT_CRITERIA = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-9)
 
@@ -30,7 +21,7 @@ def scaled_matrix(camera_matrix, full_size, size):
     scaled = np.array(camera_matrix, np.float64)
     scaled[0, 0] *= sx
     scaled[1, 1] *= sy
-    # Pixel centres at integers: the image edge is at -0.5 in both.
+    # Pixel centres at integers: the image edge is at -0.5.
     scaled[0, 2] = (scaled[0, 2] + 0.5) * sx - 0.5
     scaled[1, 2] = (scaled[1, 2] + 0.5) * sy - 0.5
     return scaled
@@ -52,8 +43,7 @@ class Undistortion:
             new = self.camera_matrix.copy()
         self.fold_radius = fold_radius(self.distortion)
         if np.isfinite(self.fold_radius):
-            # Nothing beyond the fold can be shown: zoom out no further than its circle filling
-            # the view's height (getOptimalNewCameraMatrix would try to reach the image corners).
+            # Zoom out no further than the fold circle filling the view's height.
             least = min(self.image_size) / 2 / self.fold_radius
             if new[0, 0] < least:
                 new = new.copy()
@@ -77,7 +67,6 @@ class Undistortion:
                 scaled_matrix(self.camera_matrix, self.image_size, size), self.distortion,
                 None, new, size, cv2.CV_32FC1)
             if np.isfinite(self.fold_radius):
-                # Beyond the fold the model maps back into the image: black instead.
                 xs = (np.arange(width) - new[0, 2]) / new[0, 0]
                 ys = (np.arange(height) - new[1, 2]) / new[1, 1]
                 beyond = np.hypot(xs[None, :], ys[:, None]) > self.fold_radius
@@ -112,11 +101,7 @@ class Undistortion:
         return result.astype(np.float32)
 
     def directions(self, points, vectors):
-        """
-        Vectors (N, 2) at points (N, 2) as they point in the undistorted view, same lengths.
-
-        Only the direction changes (the lengths stay errors in camera pixels).
-        """
+        """Turn vectors (N, 2) at points (N, 2) into the undistorted view; lengths are kept."""
         vectors = np.asarray(vectors, np.float64)
         lengths = np.hypot(vectors[:, 0], vectors[:, 1])
         unit = np.divide(vectors, lengths[:, None], out=np.zeros_like(vectors),

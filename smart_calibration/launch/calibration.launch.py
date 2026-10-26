@@ -6,8 +6,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    # The node runs on whatever `python3` is first on PATH (see setup.cfg), so activate the
-    # package venv before launching (see README.md).
+    # Activate the package venv before launching (see README.md).
     return LaunchDescription([
         DeclareLaunchArgument(
             'image_topic',

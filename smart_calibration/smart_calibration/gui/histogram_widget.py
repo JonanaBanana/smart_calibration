@@ -14,11 +14,9 @@ CURVE_COLOR = QColor(60, 210, 255)
 
 class HistogramWidget(QWidget):
     """
-    Tone mapping plot for the side panel.
+    Histogram before (grey) and after (orange) the contrast curve, and the curve (cyan).
 
-    Histogram of the detection image before (grey, filled) and after (orange) the S-shaped
-    contrast curve, with the curve itself (cyan; input along x, output along y) and its midpoint.
-    Bar heights use a square-root scale, so small peaks stay visible next to large ones.
+    Square-root height scale, so small peaks stay visible.
     """
 
     def __init__(self, parent=None):
@@ -77,7 +75,7 @@ class HistogramWidget(QWidget):
 
     @staticmethod
     def _points(plot, heights):
-        """One point per bin (0-1 heights), centred on the bin."""
+        """One point per bin (heights 0-1), at the bin centre."""
         n = len(heights)
         return [QPointF(plot.left() + (i + 0.5) / n * plot.width(),
                         plot.bottom() - h * plot.height())

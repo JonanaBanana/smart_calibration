@@ -1,10 +1,4 @@
-"""
-ROS side of the calibration GUI, used from the Qt thread through thread-safe methods.
-
-Receives the calibration node's previews, detections and calibrations (and, on request, the raw
-camera stream), reads / sets the calibration node's live parameters, and drives its final
-calibration pass (finish, resume, accept, and fetching kept views for display).
-"""
+"""ROS side of the calibration GUI; its methods are called from the Qt thread."""
 
 import collections
 import threading
@@ -22,23 +16,21 @@ from rclpy.qos import (
 from sensor_msgs.msg import CompressedImage, Image
 from std_srvs.srv import Trigger
 
-from smart_calibration.image_preprocessing import (
+from smart_calibration.preprocessing import (
     FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS, to_mono8)
 from smart_calibration.qos import image_qos
 from smart_calibration_interfaces.msg import (
     BoardDetection, CalibrationState, FinalCalibration, ToneHistogram)
 from smart_calibration_interfaces.srv import Finish, GetView
 
-# Buffers for pairing images with detections by timestamp; they must cover the detection
-# latency (a detection arrives after its preview / raw frame).
+# Buffers for pairing images with detections by timestamp; they cover the detection latency.
 PREVIEW_BUFFER_SIZE = 10
 RAW_BUFFER_SIZE = 30
 DETECTION_BUFFER_SIZE = 30
 
 Frame = collections.namedtuple('Frame', ['stamp_ns', 'image', 'encoding'])
 
-# A kept view fetched from the calibration node (GetView): thumbnail (h, w) uint8, the full
-# image's width, corners (N, 2) and their residuals (N, 2) or None, all in full image pixels.
+# A kept view from GetView; points and residuals (or None) in full image pixels.
 KeptView = collections.namedtuple('KeptView', ['thumbnail', 'image_width', 'points',
                                                'residuals'])
 
@@ -54,7 +46,7 @@ Snapshot = collections.namedtuple('Snapshot', [
     'histogram',          # newest ToneHistogram, or None
     'calibration',        # newest CalibrationState, or None
     'final',              # newest FinalCalibration, or None
-    'views',              # {(run, index): KeptView} fetched for the final pass display
+    'views',              # {(run, index): KeptView} fetched so far
     'service_message',    # reply to the last finish / resume / accept call, or None
     'preview_fps',
     'detection_fps',
@@ -74,8 +66,7 @@ def to_display_image(bridge, msg):
         return to_mono8(bridge.imgmsg_to_cv2(msg, 'passthrough'))
     if msg.encoding in ('mono8', '8UC1'):
         return bridge.imgmsg_to_cv2(msg, 'mono8')
-    # cv_bridge handles 8-bit color, Bayer and YUV encodings.
-    return bridge.imgmsg_to_cv2(msg, 'rgb8')
+    return bridge.imgmsg_to_cv2(msg, 'rgb8')  # also Bayer and YUV
 
 
 def newest_pair(frames, detections):
@@ -133,7 +124,6 @@ class GuiNode(Node):
         self._detection_rate = RateMeter()
         self._raw_rate = RateMeter()
 
-        # Best effort: newest previews matter, and it connects to any publisher.
         self.preview_sub = self.create_subscription(
             CompressedImage, f'{self.target}/preview', self.preview_callback,
             QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
@@ -143,13 +133,13 @@ class GuiNode(Node):
         self.histogram_sub = self.create_subscription(
             ToneHistogram, f'{self.target}/histogram', self.histogram_callback,
             QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT))
-        # Transient local like the publisher: the newest calibration even if it came earlier.
+        # Transient local: also the calibration published before the GUI started.
         self._calibration = None
         self.calibration_sub = self.create_subscription(
             CalibrationState, f'{self.target}/calibration', self.calibration_callback,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
 
-        # Final calibration pass: its state (transient local like calibrations) and services.
+        # Final calibration pass.
         self._final = None
         self.final_sub = self.create_subscription(
             FinalCalibration, f'{self.target}/final_calibration', self.final_callback,
@@ -161,12 +151,11 @@ class GuiNode(Node):
         self._views = {}  # (run, index) -> KeptView, or None while requested
         self._service_message = None
 
-        # Raw camera stream: subscribed only while the raw view is switched on.
+        # Raw camera stream, subscribed only while shown.
         self._raw_wanted = False
         self._raw_sub = None
 
-        # The calibration node's live parameters: fetched once it is reachable, then kept in
-        # sync through parameter events (also covers changes made with `ros2 param set`).
+        # The calibration node's parameters: fetched once, then updated from parameter events.
         self.parameters = {}
         self._parameters_requested = False
         self._get_client = self.create_client(GetParameters, f'{self.target}/get_parameters')
@@ -211,7 +200,7 @@ class GuiNode(Node):
     def final_callback(self, msg):
         with self._lock:
             if self._final is not None and msg.run != self._final.run:
-                self._views.clear()  # residuals and indices belong to one final pass
+                self._views.clear()  # they belong to the previous pass
             self._final = msg
 
     def raw_callback(self, msg):
@@ -237,7 +226,7 @@ class GuiNode(Node):
             if not enabled:
                 self._raw_frames.clear()
         if enabled:
-            # Choosing the QoS may wait up to 2 s for discovery; keep that off the Qt thread.
+            # Choosing the QoS waits for discovery: not on the Qt thread.
             threading.Thread(target=self._subscribe_raw, daemon=True).start()
         elif sub is not None:
             self.destroy_subscription(sub)
@@ -272,7 +261,7 @@ class GuiNode(Node):
     # ------------------------------------------------------------------ parameters
 
     def poll_parameters(self, names):
-        """Fetch the calibration node's parameters once it is reachable; call periodically."""
+        """Fetch the calibration node's parameters once it is reachable; call regularly."""
         with self._lock:
             if self._parameters_requested or not self._get_client.service_is_ready():
                 return
@@ -290,7 +279,7 @@ class GuiNode(Node):
                 self.parameters[name] = parameter_value_to_python(value)
 
     def set_parameter(self, name, value):
-        """Ask the calibration node to change a parameter; returns False if it is unreachable."""
+        """Ask the calibration node to change a parameter; False if it is unreachable."""
         if not self._set_client.service_is_ready():
             return False
         request = SetParameters.Request(
@@ -318,7 +307,7 @@ class GuiNode(Node):
     # ------------------------------------------------------------------ final calibration pass
 
     def _call(self, client, request, name):
-        """Call a service; its reply message is shown by the GUI. False if unreachable."""
+        """Call a service and keep its reply message; False if unreachable."""
         if not client.service_is_ready():
             with self._lock:
                 self._service_message = f'{name}: calibration node not reachable'
@@ -334,7 +323,7 @@ class GuiNode(Node):
             self._service_message = f'{name}: {text}'
 
     def finish_available(self):
-        """Whether the calibration node's finish service is reachable."""
+        """Return whether the finish service is reachable."""
         return self._finish_client.service_is_ready()
 
     def finish(self, keep=()):
@@ -348,7 +337,7 @@ class GuiNode(Node):
         return self._call(self._accept_client, Trigger.Request(), 'accept')
 
     def request_view(self, run, index):
-        """Fetch a kept view of final pass run (appears in snapshot().views), once."""
+        """Fetch a kept view of final pass run once; it appears in snapshot().views."""
         with self._lock:
             if (run, index) in self._views or not self._view_client.service_is_ready():
                 return

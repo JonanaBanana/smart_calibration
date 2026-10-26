@@ -5,8 +5,7 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # Can run on a different machine than calibration_node (e.g. a laptop connected to the
-    # robot). Activate the package venv before launching (see README.md).
+    # May run on another machine than calibration_node. Activate the package venv first.
     return LaunchDescription([
         DeclareLaunchArgument(
             'calibration_node',

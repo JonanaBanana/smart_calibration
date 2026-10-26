@@ -1,201 +1,204 @@
 # smart_calibration
 
-ROS 2 (Humble) packages for tunable monocular camera calibration with a square-cell chessboard,
-for pinhole (`plumb_bob`) and fisheye (`equidistant`) camera models.
-Background research and design notes are in [explore.md](explore.md).
+Interactive monocular camera calibration for ROS 2 Humble. A calibration node detects a
+chessboard in the camera stream, keeps only good and new views, and calibrates in the background
+while a GUI shows where the calibration is still uncertain. When enough views are collected, a
+final pass removes outlier views, and the result is saved as an OpenCV YAML file.
 
-## Repository layout
+- **Board modes:** a plain chessboard, or an oversized radon checkerboard with markers that only
+  needs to be partly visible
+- **View checks:** motion, misplaced corners and duplicates are rejected before a view is kept
+- **Live guidance:** an uncertainty map over the image, plus hints on missing view types (tilts,
+  image corners)
+- **Final pass:** outlier views are removed automatically, and you can inspect each view's corner
+  errors
+- **Undistorted view:** check the calibration on the live stream
+- **Tunable preprocessing** for low-contrast cameras (e.g. thermal): contrast stretch, gamma and
+  an S-curve, with a live histogram
 
-```
-smart_calibration/                 repository root
-├── smart_calibration/             ament_python package: calibration node (and later the GUI)
-├── smart_calibration_interfaces/  ament_cmake package: message / service definitions
-├── utility/                       pattern generator (from OpenCV), synthetic test images
-├── dataset/                       generated test images (not in git)
-├── .venv/                         Python venv shared by the nodes (not in git)
-├── requirements.txt
-├── THIRD_PARTY_NOTICES.md         files from other projects and their licences
-└── explore.md                     research and design notes
-```
-
-## Synthetic test images
-
-`utility/synthetic_dataset.py` renders test images with exact ground truth: a simulated
-1280x720 camera (90 deg, pinhole + plumb_bob or fisheye + equidistant, `--model`) sees the plain
-6x7 chessboard (completely visible) and an oversized radon checkerboard with markers in random
-poses, with perspective, lens distortion, blur, noise and vignetting. `utility/evaluate_dataset.py`
-runs the package's preprocessing and detection on them and reports detection rates, corner errors,
-marker origins, false detections, and how well a calibration from the detections recovers the
-true camera. With the venv active, from the repository root:
-
-```bash
-python utility/synthetic_dataset.py --output dataset/synthetic   # 210 images, ~75 s, ~90 MB
-python utility/evaluate_dataset.py dataset/synthetic --exhaustive
-# also draw true (cyan crosses) and detected corners (green / yellow / red by error) into
-# images named by their worst corner error, with a zoomed inset of that corner:
-python utility/evaluate_dataset.py dataset/synthetic --exhaustive --visualize dataset/synthetic/visualized
-```
-
-Synthetic images are cleaner than a real camera's: use them to check that the code is correct, not
-to tune thresholds or preprocessing for a real camera.
+Camera model: pinhole with `plumb_bob` distortion (k1, k2, p1, p2, k3); fisheye is planned.
 
 ## Installation
 
-### 1. Python dependencies (venv at the repository root)
+The nodes run in a Python venv with OpenCV 4.11, numpy 1.26 and PySide6
+([requirements.txt](requirements.txt) explains the pins). ROS's own Python packages (`rclpy`,
+`cv_bridge`) come from sourcing ROS. Qt also needs the `libxcb-cursor0` apt package.
 
 ```bash
-cd ~/ros2_ws/src/smart_calibration
+cd ~/ros2_ws/src
+git clone https://github.com/JonanaBanana/smart_calibration.git
+cd smart_calibration
 python3 -m venv .venv --prompt smart_calibration
-touch .venv/COLCON_IGNORE   # keep colcon from searching the venv for packages
-# `&&`: stop if activation fails, so pip can never install outside the venv
+touch .venv/COLCON_IGNORE
 source .venv/bin/activate && pip install -r requirements.txt
-python -c "import cv2; print(cv2.__version__, cv2.__file__)"   # expect 4.11.0, inside .venv/
 deactivate
 ```
 
-The venv is isolated (no system site-packages). ROS Python packages (`rclpy`, `cv_bridge`, ...)
-come from sourcing ROS, not from the venv. See [requirements.txt](requirements.txt) for why
-OpenCV 4.11 (headless) / numpy 1.26 / PySide6 6.11 are pinned. Qt 6 also needs the
-`libxcb-cursor0` apt package.
-
-If an existing venv still has the non-headless `opencv-python`, remove it first; both wheels
-install the same `cv2` module and must not be installed together:
-
-```bash
-source .venv/bin/activate && pip uninstall -y opencv-python && pip install -r requirements.txt
-```
-
-### 2. Build
+Build with the venv **deactivated** and **without** `--symlink-install`:
 
 ```bash
 cd ~/ros2_ws
 source /opt/ros/humble/setup.bash
 colcon build --packages-select smart_calibration_interfaces smart_calibration
-source install/setup.bash
 ```
 
-Build with the venv **deactivated**: the message code generators run on the first `python3` on
-`PATH` and need system Python packages the venv does not have (the interfaces package stops with
-an error otherwise). Activate the venv only for running the nodes.
+The message generators need the system Python, so the build stops with an error if a venv is
+active. The installed executables run on the first `python3` on `PATH`, which is the venv's once
+it's activated; symlink builds would ignore that. Rebuild after every change, including edits to
+the config files.
 
-Build **without** `--symlink-install`: `smart_calibration/setup.cfg` gives the installed
-executables a `#!/usr/bin/env python3` shebang, and colcon ignores that setting for symlink builds.
-Rebuild after every code change (files are copied into `install/`).
+## Usage
 
-## Running
-
-Activate the venv first, in every terminal that runs something from these packages:
+In every terminal that runs a node:
 
 ```bash
 source /opt/ros/humble/setup.bash
 source ~/ros2_ws/install/setup.bash
 source ~/ros2_ws/src/smart_calibration/.venv/bin/activate
-
-ros2 launch smart_calibration calibration_with_gui.launch.py # both on this machine
-# or separately, e.g. the GUI on a laptop:
-ros2 launch smart_calibration calibration.launch.py          # calibration node (on the robot)
-ros2 launch smart_calibration gui.launch.py                  # GUI (on the robot or a laptop)
-# or
-ros2 run smart_calibration calibration_node
-ros2 run smart_calibration calibration_gui
 ```
 
-The calibration node and the GUI talk over ROS only, so the GUI can run on another machine in the
-same ROS network (same `ROS_DOMAIN_ID`), e.g. a laptop connected to a drone. Both need the venv.
+```bash
+# node and GUI on one machine
+ros2 launch smart_calibration calibration_with_gui.launch.py image_topic:=/my_camera/image
 
-Launch arguments:
+# or separately, e.g. the node on a robot and the GUI on a laptop (same ROS_DOMAIN_ID)
+ros2 launch smart_calibration calibration.launch.py image_topic:=/my_camera/image
+ros2 launch smart_calibration gui.launch.py
+```
 
-| Launch file | Argument | Default |
+| Launch argument | Default | |
 |---|---|---|
-| `calibration.launch.py`, `calibration_with_gui.launch.py` | `image_topic` | `/ircam_wide/decoded` |
-| | `params_file` | `config/ircam_wide.yaml` (installed copy) |
-| | `log_level` (calibration_node; `debug` logs a line per frame) | `info` |
-| `gui.launch.py` | `image_topic` (raw view only) | `/ircam_wide/decoded` |
-| | `calibration_node` | `/calibration_node` |
+| `image_topic` | `/ircam_wide/decoded` | camera image topic (the GUI only uses it for the raw view) |
+| `params_file` | installed `config/ircam_wide.yaml` | node parameters (not for `gui.launch.py`) |
+| `log_level` | `info` | `debug` logs one line per frame (not for `gui.launch.py`) |
+| `calibration_node` | `/calibration_node` | node the GUI connects to (`gui.launch.py` only) |
 
-calibration_node's settings live in a parameter file, one per camera / board
-([config/ircam_wide.yaml](smart_calibration/config/ircam_wide.yaml) is the tuned example):
+### Calibrating
 
-| Parameter | Live | Meaning |
+1. **Collect views.** Hold the board still in different places, distances and tilts. The status
+   box at the top left shows the checks for each frame: motion, corners, new view. "kept #N" means
+   the view was kept.
+2. **Follow the guidance.** From 5 views on, the node calibrates in the background. The
+   uncertainty map shows where the calibration is still weak: bring the board to the red regions.
+   The amber hints name missing view types, e.g. "Tilt the top or bottom edge towards the camera".
+3. **Finish.** The node stops collecting and removes clear outliers: views the other views predict
+   badly. The video then shows all kept views; click one to see its corner errors.
+   - **Restore:** puts a removed view back.
+   - **Resume:** collects more views.
+   - **Suspect** (amber): a flagged view that is the only one of its region. Add views there.
+4. **Accept** saves the calibration to `output_file`, on the machine running the node.
+
+Check **undistorted** in the View box to see the stream undistorted by the current calibration.
+A dashed amber line marks where the distortion model is not valid yet; views near the image
+corners move it out.
+
+### Output
+
+An OpenCV YAML file, readable with `cv2.FileStorage`:
+
+```yaml
+%YAML:1.0
+---
+M: !!opencv-matrix        # camera matrix, 3 x 3
+   ...
+D: !!opencv-matrix        # k1, k2, p1, p2, k3 (5 x 1)
+   ...
+reprojection_error: 0.11
+width: 1280
+height: 720
+distortion_model: plumb_bob
+calibration_time: "2026-10-26 15:02:11"
+```
+
+## Boards
+
+- **`chessboard`:** a plain chessboard, always completely visible. Set `board_cols` and
+  `board_rows` to its **inner** corners (squares − 1). Leave a white border of about one square.
+- **`oversized_marker`:** a radon checkerboard larger than the camera's view. Three marker dots
+  in an L near its middle fix its orientation and origin. Exactly one of the three must be a black
+  dot in a white cell; that cell's top-left corner is the origin. Any visible part with at least
+  5 × 5 corners and the markers is detected, so the image corners are easy to cover.
+
+Generate a board with OpenCV's pattern generator, e.g. 14 × 10 squares of 50 mm with markers in
+cells (7, 4), (8, 4) and (7, 5):
+
+```bash
+python utility/generate_pattern.py -o radon.svg -T radon_checkerboard -c 14 -r 10 -s 50 \
+    -u mm -w 800 -h 600 -m 7 4 8 4 7 5
+```
+
+Print it flat and rigid, and measure the printed square size for `square_size`.
+
+## Parameters
+
+Set in the parameter file ([config/ircam_wide.yaml](smart_calibration/config/ircam_wide.yaml),
+one per camera). Except for the startup ones, they can be changed while running, from the GUI or
+with `ros2 param set /calibration_node <name> <value>`. Such changes are not written back to the
+file.
+
+| Parameter | Meaning |
+|---|---|
+| `board_mode`, `board_cols`, `board_rows`, `square_size` | board, see [Boards](#boards); `square_size` in metres (startup) |
+| `stretch_low_percentile`, `stretch_high_percentile` | intensity percentiles mapped to black and white |
+| `gamma` | after the stretch; > 1 brightens dark regions |
+| `contrast_strength`, `contrast_midpoint` | S-curve after gamma: grey levels below the midpoint get darker, above it lighter; strength 0 is off. Put the midpoint between the dark and light squares' peaks in the GUI histogram |
+| `detector_normalize`, `detector_exhaustive`, `detector_accuracy` | detector flags: histogram equalization; longer search (finds more boards, slower); more accurate corners (~4× slower) |
+| `max_board_speed` | largest board speed of a kept view, px/s |
+| `max_corner_residual` | largest distance of a corner from where its neighbours put it, in squares; one bad corner rejects the frame |
+| `min_view_distance` | smallest difference of the board outline to every kept view, in board sizes |
+| `border_margin_px` | corners closer to the image border are not used |
+| `min_calibration_views`, `calibrate_every_views` | first background calibration at this many views, then after every this many new views |
+| `free_k3_after_views` | k3 stays 0 below this many views |
+| `uncertainty_scale` | factor on the estimated uncertainty, which assumes independent corner errors and comes out too small |
+| `outlier_z_limit` | final pass: robust z-score of a view's leave-one-out error that flags it |
+| `outlier_min_views` | final pass: no outlier check with fewer views |
+| `outlier_max_uncertainty_increase` | final pass: a flagged view is kept as a suspect if removing it raises the mean uncertainty by more than this factor |
+| `outlier_max_fraction` | final pass: at most this fraction of the views is removed |
+| `output_file` | where Accept saves; strftime placeholders (`%Y`, `%m`, ...) and `~` work |
+| `image_qos` | `auto` (match the camera), `reliable` or `best_effort` (startup) |
+| `preview_max_width`, `preview_jpeg_quality` | preview images sent to the GUI (startup) |
+
+## ROS interface
+
+All names are relative to the node (`/calibration_node/...`). The types are in
+`smart_calibration_interfaces`.
+
+| Name | Type | |
 |---|---|---|
-| `board_mode` | no | `chessboard`: plain chessboard, completely visible. `oversized_marker`: radon checkerboard larger than the camera's view with three marker dots in an L near its middle (exactly one of them a black dot in a white cell: the origin); every frame may show a different part of it (at least 5 x 5 corners, markers visible), corners get board coordinates relative to the origin. Generate it with OpenCV's `gen_pattern.py -T radon_checkerboard -m ...` |
-| `board_cols`, `board_rows` | no | inner corners of the chessboard (squares - 1), `chessboard` mode only |
-| `square_size` | no | side length of one square in metres (measure the printed board); scales the board poses, not the intrinsics |
-| `stretch_low_percentile`, `stretch_high_percentile` | yes | contrast stretch: these intensity percentiles become black / white |
-| `gamma` | yes | applied after the stretch; > 1 brightens dark regions, < 1 darkens bright ones |
-| `contrast_strength`, `contrast_midpoint` | yes | S-shaped contrast curve after gamma: grey levels below the midpoint (0-1) get darker, above it lighter; strength = steepness (0: off). Best midpoint: between the dark and light squares' histogram peaks (GUI plot) |
-| `detector_normalize`, `detector_exhaustive`, `detector_accuracy` | yes | findChessboardCornersSB flags (see explore.md) |
-| `max_board_speed` | yes | detections are only kept while the board moves at most this many pixels per second (mean corner movement since the previous detection, at most 0.5 s earlier), against motion blur. The debug log (launch argument `log_level:=debug`) shows the speed per frame |
-| `max_corner_residual` | yes | frames with a misplaced corner or a deformed region are not kept: for each corner, its distance from where a quadratic surface through its neighbours (within 3 squares, the corner left out) puts it, in square sizes. Works the same at the edges of the grid; correct corners stay below ~0.06 on synthetic views. Any corner above the limit discards the frame. Shown in the debug log and the GUI's status box |
-| `border_margin_px` | yes | corners outside the image or closer than this to its border are not used (the detector may predict or mismatch corners there); the rest of the frame is. Shown as gaps in the GUI overlay |
-| `min_view_distance` | yes | a still detection is only kept if its board outline (the four outermost corners, the green box in the GUI) differs from every kept view by at least this much: mean corner distance in board sizes (the mean side length of the two outlines), so a board moved by a quarter of its size counts the same near the camera as far from it. Shown in the debug log and the GUI's status box |
-| `min_calibration_views`, `calibrate_every_views` | yes | background calibration from the kept views: first once this many views are kept, then every this many new views (in its own thread; ~20 ms with 5 views, ~0.5 s with 50) |
-| `free_k3_after_views` | yes | distortion coefficient k3 stays 0 while fewer views than this are used: with few views it makes the distortion run wild where no corners are |
-| `uncertainty_scale` | yes | multiplies the calibration's estimated uncertainties: they assume independent corner errors and come out ~1.5-2.5x too small on synthetic data (`utility/uncertainty_prototype.py`) |
-| `outlier_z_limit`, `outlier_min_views` | yes | final calibration: a view is an outlier candidate if its leave-one-out error (how badly the other views predict it) has a robust z-score above the limit among all views; no outlier check with fewer than `outlier_min_views` views (unreliable with few) |
-| `outlier_max_uncertainty_increase`, `outlier_max_fraction` | yes | a candidate is only removed if that raises the mean uncertainty over the image by at most this factor (otherwise no other view covers its region: it is kept as a suspect, add views there), and at most this fraction of the views is removed (`utility/outlier_prototype.py`) |
-| `output_file` | yes | where Accept saves the calibration, on the machine running the node: OpenCV YAML (`cv2.FileStorage`) with `M` (3x3), `D` (5x1: k1, k2, p1, p2, k3), `reprojection_error`, `width`, `height`, `distortion_model`, `calibration_time`. strftime placeholders (`%Y`, `%m`, ...) and `~` work; default `~/.ros/smart_calibration/calibration_%Y-%m-%d_%H-%M-%S.yaml` |
-| `image_qos` | no | `auto` matches the camera publisher's reliability (best effort loses many large images; reliable cannot connect to a best-effort publisher), or `reliable` / `best_effort` |
-| `preview_max_width`, `preview_jpeg_quality` | no | preview images sent to the GUI |
+| `image` (input) | `sensor_msgs/Image` | camera stream: mono, colour, Bayer, YUV, 16-bit or float |
+| `~/detection` | `BoardDetection` | corners and check results of every processed frame |
+| `~/preview`, `~/histogram` | `CompressedImage`, `ToneHistogram` | preprocessed image and its histograms, while the GUI watches |
+| `~/calibration` | `CalibrationState` | newest background calibration, uncertainty map, hints |
+| `~/final_calibration` | `FinalCalibration` | state and result of the final pass |
+| `~/finish` | `Finish` (service) | stop collecting and run the final pass; `keep` = views not to remove |
+| `~/accept`, `~/resume` | `std_srvs/Trigger` | save the result; collect more views |
+| `~/get_view` | `GetView` (service) | a kept view's thumbnail and corner errors |
 
-Live parameters can be changed while running, from the GUI (gamma / contrast / midpoint sliders
-with a histogram of the tone mapping, detector checkboxes)
-or with `ros2 param set /calibration_node <name> <value>`; the others are rejected while running.
-Changes made while running are not written back to the file. Since the installed copy is used,
-rebuild after editing a file under `config/`, or pass your own file with `params_file:=<path>`.
+## Development
 
-The executables run on whatever `python3` is first on `PATH`, which is the venv's interpreter
-when it is activated. Without the venv, the node exits with an error instead of silently running
-on the system Python and its OpenCV 4.5.4.
+```bash
+# tests (system Python, with ROS sourced), from smart_calibration/
+python3 -m pytest test/
 
-The camera topic is set with `image_topic:=<topic>` (default `/ircam_wide/decoded`), or with
-`--ros-args -r image:=<topic>` for `ros2 run`.
+# synthetic test images with exact ground truth, and an evaluation of detection and calibration
+# (venv active, from the repository root)
+python utility/synthetic_dataset.py --output dataset/synthetic
+python utility/evaluate_dataset.py dataset/synthetic --exhaustive --visualize dataset/synthetic/visualized
+```
 
-What it does so far:
+`utility/uncertainty_prototype.py` and `utility/outlier_prototype.py` are the experiments behind
+the uncertainty scale and the outlier rules.
 
-- **calibration_node** converts each camera frame to 8-bit grayscale (8-bit color/Bayer/YUV via
-  cv_bridge; 16-bit and float images scaled by their maximum so 10/12-bit sensors keep their
-  contrast), detects the chessboard with `findChessboardCornersSB` in a worker thread (always on
-  the newest frame; frames arriving while it is busy are dropped), and publishes a
-  `smart_calibration_interfaces/BoardDetection` per processed frame on `~/detection`.
-  Launch with `log_level:=debug` (or `ros2 run ... --ros-args --log-level debug`) for a line
-  per frame.
-- Every few kept views it **calibrates in the background** (pinhole / plumb_bob) and publishes a
-  `smart_calibration_interfaces/CalibrationState` on `~/calibration`: the camera matrix and
-  distortion, the reprojection error, the uncertainty of the estimate (largest over the image, in
-  total and per parameter group: focal length, principal point, distortion), an uncertainty map
-  over the image, the board tilt of every view, and hints about missing view types (e.g. no
-  tilted boards). The uncertainty assumes independent corner errors: it shows well *where* the
-  calibration is weak, but a small value alone does not prove a good calibration (see
-  [calibration.py](smart_calibration/smart_calibration/calibration.py)).
-- **Final calibration** (service `~/finish`, the GUI's Finish button): collection stops, the
-  node calibrates from all views, removes clear outliers one at a time (views the other views
-  predict badly, unless no other view covers their region: those are kept as suspects) and
-  calibrates again. Progress and results are published on `~/final_calibration`; `~/get_view`
-  serves a kept view's thumbnail and corner errors, `~/accept` saves the result to `output_file`,
-  `~/resume` returns to collecting (removed views are dropped). Calling `~/finish` again
-  with view indices in `keep` re-runs it with those views restored.
-- **calibration_gui** (PySide6) shows the camera image with the detected corners drawn on top,
-  a status box in its top left corner (board found; motion, corner and new-view checks with
-  their values, green = passed, red = failed, amber = too close to a kept view; "kept #N" when a
-  view is kept), the number of kept views, the newest background calibration with its
-  uncertainty and hints, an uncertainty map over the video (switchable; green below 0.25 px, red
-  from 2 px: bring the board to the red regions), and in the status bar the camera topic and
-  image size, the preview / detection rates and the replies to Finish / Accept / Resume.
-  **undistorted** (View box, once there is a calibration) shows everything undistorted by the
-  current calibration (the background one, or the final result after Finish): the video, the
-  detected corners, the uncertainty map, the view outlines and a selected view's thumbnail and
-  corner errors. The slider sets how much is shown, from only valid pixels (crop) to the whole
-  image (all). Where the estimated distortion turns back on itself (beyond the corners it was
-  fitted to, typically with few views or near the image corners), the view is black outside a
-  dashed amber line: the model is not valid there yet; views near the image edges move it out.
-  While that line lies inside the image, the Calibration box shows a hint, the final result a
-  warning above Accept, and Accept's reply a warning: saved as is, rectifying with it (e.g.
-  `image_proc`, `cv2.undistort`) would mirror the image near its corners.
-  After **Finish** the video shows the outlines of all kept views over the last frame (red
-  dashed: removed, amber: suspect, blue: restored) and the side panel the final calibration: the
-  leave-one-out error of every view against the outlier limit, the flagged views, and Restore /
-  Accept / Resume. Clicking a view (or its dot) shows its thumbnail with its corner errors as
-  arrows (x50). It shows the frame each detection was computed
-  on (matched by timestamp), so the overlay sits exactly on the board and the video lags by one
-  detection. Without detections for 1 s it shows the live image without overlay.
+```
+smart_calibration/                 repository root
+├── smart_calibration/             ament_python package: node, GUI, config, launch files, tests
+├── smart_calibration_interfaces/  messages and services
+├── utility/                       pattern generator, synthetic dataset, evaluation, prototypes
+├── requirements.txt               venv packages
+└── THIRD_PARTY_NOTICES.md
+```
+
+## License
+
+Apache-2.0. `utility/generate_pattern.py` and `utility/svgfig.py` come from OpenCV; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

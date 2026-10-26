@@ -18,30 +18,28 @@ from smart_calibration_interfaces.msg import BoardDetection, FinalCalibration
 
 REFRESH_INTERVAL_MS = 33
 RESULT_STATES = (FinalCalibration.STATE_DONE, FinalCalibration.STATE_ACCEPTED)
-# Without a detection for this long, the calibration node is considered gone.
+# Without a detection for this long, the stream counts as stopped.
 DETECTION_TIMEOUT_S = 1.0
-# After sending, wait this long for the node to confirm before showing its value again.
+# How long a sent parameter value waits for the node's confirmation.
 CONFIRM_TIMEOUT_S = 1.0
-# The status box shows "kept" this long after a view was kept, so it can be noticed.
+# How long the status box shows "kept".
 KEPT_HIGHLIGHT_S = 1.0
 
-# Gamma slider: logarithmic, so 1.0 is in the middle and 1/GAMMA_LIMIT .. GAMMA_LIMIT at the ends
-# (matches the calibration node's parameter range 0.2 - 5.0).
+# Gamma slider: logarithmic, 1/GAMMA_LIMIT .. GAMMA_LIMIT.
 GAMMA_LIMIT = 5.0
 GAMMA_STEPS = 100
-# Contrast curve sliders (calibration node ranges: strength 0 - 10, midpoint 0 - 1).
 CONTRAST_STEPS_PER_UNIT = 5
 MIDPOINT_STEPS = 100
 
 
-# Detector flag parameters of the calibration node: (name, checkbox label, tooltip).
+# Detector flags: (parameter, checkbox label, tooltip).
 DETECTOR_FLAGS = (
     ('detector_normalize', 'normalize',
      'Histogram equalization before detection; may help on dark images.'),
     ('detector_exhaustive', 'exhaustive search',
      'Searches longer: finds the board more often, slower.'),
-    ('detector_accuracy', 'accuracy (~4x slower)',
-     'More accurate corners, ~4x detection time.'),
+    ('detector_accuracy', 'accuracy',
+     'More accurate corners, ~4x slower.'),
 )
 REMOTE_PARAMETERS = ('gamma', 'contrast_strength', 'contrast_midpoint', 'board_mode',
                      'board_cols', 'board_rows') + tuple(name for name, _, _ in DETECTOR_FLAGS)
@@ -57,7 +55,7 @@ def slider_to_gamma(position):
 
 
 def detection_corners(detection):
-    """Corner array (rows, cols, 2) of a BoardDetection, or None if no board was found."""
+    """Return the corners (rows, cols, 2) of a BoardDetection, or None."""
     if not detection.found:
         return None
     return np.asarray(detection.corners, dtype=np.float32).reshape(
@@ -65,7 +63,7 @@ def detection_corners(detection):
 
 
 def check_line(label, status, value, failed_state='fail'):
-    """Status box line (label, value, mark, state) for one of BoardDetection's checks."""
+    """Return the status box line (label, value, mark, state) of a check."""
     if status == BoardDetection.CHECK_PASSED:
         return label, value, '✓', 'pass'
     if status == BoardDetection.CHECK_FAILED:
@@ -74,11 +72,7 @@ def check_line(label, status, value, failed_state='fail'):
 
 
 def status_lines(detection, kept_label=None):
-    """
-    Status box lines for a BoardDetection: board found, then its view selection checks.
-
-    kept_label replaces the new-view line (shown for a while after a view was kept).
-    """
+    """Return the status box lines of a BoardDetection; kept_label replaces the new-view line."""
     if not detection.found:
         return [('board', 'not found', '', 'fail')] + [
             (label, '-', '', 'unknown') for label in ('motion', 'corners', 'new view')]
@@ -88,7 +82,7 @@ def status_lines(detection, kept_label=None):
     if kept_label:
         lines.append(('new view', kept_label, '', 'kept'))
     else:
-        # The first view passes without a distance. Too close to a kept view is no error: amber.
+        # Too close to a kept view is no error: amber.
         distance = ('first' if math.isnan(detection.view_distance)
                     else f'{detection.view_distance:.3f}')
         lines.append(check_line('new view', detection.distance_check, distance, 'warn'))
@@ -110,7 +104,7 @@ def board_text(parameters):
 
 
 def phase_text(final):
-    """Calibration phase from the FinalCalibration state (None: collecting)."""
+    """Describe the calibration phase (final None: collecting)."""
     if final is None:
         return 'collecting views'
     return {FinalCalibration.STATE_RUNNING: f'finishing: {final.stage}',
@@ -119,17 +113,16 @@ def phase_text(final):
             FinalCalibration.STATE_ACCEPTED: 'accepted'}[final.state]
 
 
-# Calibration box rows: (label name, shown label).
+# Calibration box rows: (name, label).
 CALIBRATION_ROWS = (('board', 'board:'), ('phase', 'phase:'), ('views', 'views:'),
                     ('rms', 'rms:'), ('uncertainty', 'uncertainty:'))
 
 
 def calibration_texts(calibration, kept_views, final):
     """
-    Texts {label name: text} of the Calibration box.
+    Return the Calibration box texts {name: text}.
 
-    While collecting (final None): the newest background calibration (CalibrationState or None)
-    and the number of kept views (None if unknown). After Finish: the final pass's result.
+    While collecting (final None): the background calibration and the kept view count.
     """
     texts = dict(phase=phase_text(final), views='-', rms='-', uncertainty='-',
                  hints='')
@@ -163,14 +156,14 @@ def calibration_texts(calibration, kept_views, final):
 
 
 def final_outlines(final):
-    """View outlines (k, 2) of a FinalCalibration, in full image pixels."""
+    """Return the view outlines (k, 2) of a FinalCalibration, in full image pixels."""
     points = np.asarray(final.outline_points, np.float32).reshape(-1, 2)
     ends = np.cumsum(np.asarray(final.outline_sizes, np.int64))
     return [points[int(end) - size:int(end)] for end, size in zip(ends, final.outline_sizes)]
 
 
 def view_styles(final):
-    """Per view of a FinalCalibration: 'removed', 'suspect', 'restored' or 'kept'."""
+    """Return per view 'removed', 'suspect', 'restored' or 'kept'."""
     styles = ['kept'] * final.total_views
     if final.state in RESULT_STATES:
         for index in final.forced:
@@ -188,7 +181,7 @@ def polygon_area(polygon):
 
 
 def inside(polygon, x, y):
-    """Whether (x, y) lies inside a polygon (k, 2) (even-odd rule)."""
+    """Return whether (x, y) lies inside a polygon (k, 2)."""
     x0, y0 = polygon[:, 0], polygon[:, 1]
     x1, y1 = np.roll(x0, -1), np.roll(y0, -1)
     crosses = (y0 > y) != (y1 > y)
@@ -198,13 +191,13 @@ def inside(polygon, x, y):
 
 
 def view_at(outlines, x, y):
-    """Index of the smallest outline containing (x, y), or None."""
+    """Return the index of the smallest outline containing (x, y), or None."""
     hits = [i for i, outline in enumerate(outlines) if inside(outline, x, y)]
     return min(hits, key=lambda i: polygon_area(outlines[i])) if hits else None
 
 
 def flagged_entries(final):
-    """(view index, text, style) for each view the final pass flagged or the user restored."""
+    """Return (view index, text, style) for each flagged or restored view."""
     entries = []
     for index, z, ratio in zip(final.removed, final.removed_z, final.removed_uncertainty_ratio):
         entries.append((index, f'#{index + 1} removed: {final.leave_one_out[index]:.2f} px, '
@@ -234,14 +227,14 @@ def view_description(final, index):
 
 
 def current_calibration(calibration, final):
-    """Return the calibration the GUI shows: the final pass's result, else the background one."""
+    """Return the final pass's result, else the background calibration."""
     if final is not None:
         return final.final if final.state in RESULT_STATES else None
     return calibration
 
 
 def undistortion_key(calibration, alpha):
-    """Return what an Undistortion for a CalibrationState depends on (see Undistortion.key)."""
+    """Return Undistortion.key() for a CalibrationState."""
     return (tuple(float(v) for v in calibration.camera_matrix),
             tuple(float(v) for v in calibration.distortion),
             (int(calibration.image_width), int(calibration.image_height)), alpha)
@@ -263,19 +256,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('smart_calibration')
 
         self.video = VideoWidget()
-        # What is displayed, compared by identity (frames hold numpy arrays).
+        # What is displayed, compared by identity.
         self._shown_frame = None
         self._shown_detection = None
         self._shown_message = None
-        self._kept_highlight = None  # (label, monotonic time until which it is shown)
-        self._pending = {}  # parameter name -> (value sent, time sent), until the node confirms
+        self._kept_highlight = None  # (label, monotonic time it ends)
+        self._pending = {}  # parameter name -> (value sent, time sent)
 
         # View
         self.raw_toggle = QCheckBox('raw camera (full resolution)')
         self.raw_toggle.setToolTip('Show the camera stream instead of the preprocessed preview.')
-        # Mouse only: as the first widget it would get the keyboard focus when the window opens,
-        # and a stray Space key press (e.g. typing in the terminal as the window appears) would
-        # switch it on.
+        # Mouse only, so a stray Space key does not toggle it.
         self.raw_toggle.setFocusPolicy(Qt.NoFocus)
         self.raw_toggle.toggled.connect(self.node.set_raw_enabled)
         self.map_toggle = QCheckBox('uncertainty map')
@@ -309,7 +300,7 @@ class MainWindow(QMainWindow):
         view_layout.addWidget(self.undistort_toggle)
         view_layout.addWidget(self.alpha_row)
 
-        # Detection: tone mapping sliders, histogram, detector flags
+        # Detection
         self.sliders = {
             'gamma': ParameterSlider(
                 'gamma', -GAMMA_STEPS, GAMMA_STEPS, gamma_to_slider, slider_to_gamma,
@@ -344,8 +335,7 @@ class MainWindow(QMainWindow):
             detection_box.layout().addRow(box)
             self.flag_boxes[name] = box
 
-        # Calibration: the views, the current calibration (background, or the final pass's
-        # result after Finish), and the controls of the current phase.
+        # Calibration
         self.calibration_labels = {
             name: QLabel('-') for name in [row for row, _ in CALIBRATION_ROWS] + ['hints']}
         tooltips = dict(
@@ -470,8 +460,7 @@ class MainWindow(QMainWindow):
             self.leave_canvas()
         elif self.raw_toggle.isChecked():
             if live and snap.raw_frame is not None:
-                # The camera frame the newest available detection was computed on, so the
-                # overlay sits exactly on the board.
+                # The frame the newest detection was computed on.
                 self.show_pair(snap.raw_frame, snap.raw_detection)
             elif not live and snap.newest_raw is not None:
                 self.show_pair(snap.newest_raw, None,
@@ -518,7 +507,7 @@ class MainWindow(QMainWindow):
         self._last_image = frame.image  # background of the views canvas after Finish
 
     def show_message(self, message):
-        """Show a message over the last picture (kept for orientation)."""
+        """Show a message over the last picture."""
         if self._shown_frame is None and self._shown_message == message:
             return
         self.video.set_message(message)
@@ -531,7 +520,7 @@ class MainWindow(QMainWindow):
             self._pending[name] = (value, time.monotonic())
 
     def confirmed(self, name, value):
-        """Return False while a value sent for name is not yet reflected by the node."""
+        """Return False while the node does not reflect a value sent for name yet."""
         if name not in self._pending:
             return True
         sent, sent_at = self._pending[name]
@@ -559,7 +548,7 @@ class MainWindow(QMainWindow):
             slider.show_remote(value)
 
     def update_histogram(self, snap):
-        # The curve follows a slider while it is moved, otherwise the node's value.
+        # The slider's value while it is moved, else the node's.
         curve = []
         for name in ('contrast_strength', 'contrast_midpoint'):
             slider = self.sliders[name]
@@ -574,7 +563,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ calibration
 
     def update_undistortion(self, calibration):
-        """Rebuild the undistortion if the calibration or the settings changed; redraw then."""
+        """Rebuild the undistortion if the calibration or settings changed, and redraw."""
         self.undistort_toggle.setEnabled(calibration is not None)
         wanted = calibration is not None and self.undistort_toggle.isChecked()
         self.alpha_row.setVisible(self.undistort_toggle.isChecked())
@@ -592,12 +581,11 @@ class MainWindow(QMainWindow):
             self.video.set_boundary(
                 undistortion.fold_outline() if undistortion is not None else None,
                 undistortion.image_size[0] if undistortion is not None else None)
-            # Everything on screen is redrawn with (or without) it.
             self._shown_frame = self._shown_detection = self._shown_message = None
             self._shown_canvas = self._shown_map = None
 
     def update_map(self, calibration, final):
-        """Uncertainty map of the background calibration, or of the final pass (final)."""
+        """Show the uncertainty map of the background calibration, or of the final pass."""
         mapped = calibration
         if final is not None:
             mapped = None
@@ -618,7 +606,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ final calibration pass
 
     def show_canvas(self, snap):
-        """Show the views canvas: kept view outlines over the last frame, or the selected view."""
+        """Show the kept view outlines over the last frame, or the selected view."""
         final = snap.final
         if self._canvas_frame is None:
             self._canvas_frame = (self._last_image if self._last_image is not None
@@ -662,7 +650,7 @@ class MainWindow(QMainWindow):
             outlines = [undistortion.points(outline) for outline in outlines]
         self._shown_outlines = outlines  # what a click is tested against
         self.video.set_views(outlines, view_styles(final), selected, final.image_width)
-        # The live view redraws completely once collection resumes.
+        # Redraw the live view completely once collection resumes.
         self._shown_frame = self._shown_detection = self._shown_message = None
 
     def leave_canvas(self):
@@ -687,13 +675,8 @@ class MainWindow(QMainWindow):
         self.node.finish(sorted(set(final.forced) | {self._selected_view}))
 
     def update_calibration(self, snap, final):
-        """
-        Update the Calibration box: texts, and the controls of the phase.
-
-        final: the FinalCalibration after Finish, None while collecting (the detection settings
-        are hidden after Finish, to make room).
-        """
-        # The last known count: views stay kept when the camera stops.
+        """Update the Calibration box; final: the FinalCalibration after Finish, else None."""
+        # The last known count, also when the stream stopped.
         kept = snap.detection.kept_views if snap.detection is not None else None
         inputs = (snap.calibration, kept, final, board_text(snap.parameters))
         if self._shown_texts is None or any(
@@ -707,7 +690,6 @@ class MainWindow(QMainWindow):
 
         self.detection_box.setVisible(final is None)
         self.finish_button.setVisible(final is None)
-        # The node finishes from the kept views, so no camera images are needed.
         self.finish_button.setEnabled(self.node.finish_available() and bool(kept))
         self.final_section.setVisible(final is not None)
         if final is None:
@@ -740,7 +722,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ labels
 
     def update_labels(self, snap, live):
-        """Status bar: camera topic and size, what is shown, detection rate, service replies."""
+        """Update the status bar."""
         detection = snap.detection
         camera = f'camera {self.node.raw_topic}' + (
             f' ({detection.image_width} x {detection.image_height})' if detection else '')

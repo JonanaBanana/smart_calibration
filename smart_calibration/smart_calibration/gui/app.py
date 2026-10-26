@@ -14,7 +14,7 @@ from smart_calibration.gui.ros_bridge import GuiNode
 
 
 def run(args=None):
-    # rclpy's own SIGINT handler would only shut down ROS; the Qt event loop must stop too.
+    # Signals are handled below, so that they also stop Qt.
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = GuiNode()
     executor = SingleThreadedExecutor()
@@ -22,21 +22,17 @@ def run(args=None):
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
-    # Only the program name: ROS arguments (--ros-args ...) are not meant for Qt.
     app = QApplication(sys.argv[:1])
     window = MainWindow(node)
     window.resize(1280, 800)
     window.show()
 
-    # Python runs signal handlers only when Qt calls back into Python, which the window's
-    # refresh timer does regularly.
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, lambda *_: app.quit())
     try:
         app.exec()
     finally:
-        # Under ros2 launch, Ctrl+C delivers SIGINT twice; keep the second one from interrupting
-        # the cleanup below.
+        # ros2 launch forwards a second SIGINT.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         executor.shutdown()
         node.destroy_node()

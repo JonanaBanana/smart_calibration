@@ -1,5 +1,5 @@
 """
-Calibration files in OpenCV's YAML format (cv2.FileStorage), readable with cv2.FileStorage too.
+Calibration files in OpenCV's YAML format (cv2.FileStorage).
 
     %YAML:1.0
     ---
@@ -20,13 +20,13 @@ import numpy as np
 
 
 def output_path(pattern, when):
-    """Path from a pattern with strftime placeholders (e.g. %Y-%m-%d) and ~ for the home folder."""
+    """Expand strftime placeholders (e.g. %Y-%m-%d) and ~ in a path pattern."""
     return Path(os.path.expanduser(when.strftime(pattern)))
 
 
 def write_calibration(path, camera_matrix, distortion, reprojection_error, image_size,
                       distortion_model, when):
-    """Write a calibration file (creating its folder); raise OSError if it cannot be written."""
+    """Write a calibration file, creating its folder; raise OSError on failure."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     storage = cv2.FileStorage(str(path), cv2.FILE_STORAGE_WRITE)
@@ -45,7 +45,7 @@ def write_calibration(path, camera_matrix, distortion, reprojection_error, image
 
 
 def read_calibration(path):
-    """Read a calibration file: dict with the keys above (matrices as numpy arrays)."""
+    """Read a calibration file into a dict with the keys above."""
     storage = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
     if not storage.isOpened():
         raise OSError(f'cannot read {path}')

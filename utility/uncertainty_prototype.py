@@ -2,23 +2,10 @@
 """
 Prototype: does a calibration's own uncertainty predict its true error? (pinhole only)
 
-Detects the boards of a synthetic dataset (synthetic_dataset.py) with the package's detection
-and corner check, as the calibration node does, then calibrates from growing random sequences of
-the detected views, as a background calibration in the node would. After each calibration:
-
-- the covariance of the intrinsics (fx, fy, cx, cy, k1, k2, p1, p2[, k3]): sigma^2 (J^T J)^-1
-  over all views, the poses eliminated (Schur complement); sigma from the residuals, not an
-  assumed 1 px;
-- the predicted uncertainty map: how far a point could be off in pixels (sqrt of the trace of
-  the 2 x 2 covariance of its projection), on a grid over the image;
-- the true error map: where the estimated model projects the true ray through each grid pixel
-  (the raw error of evaluate_dataset.mapping_error);
-- per view, the board tilt (angle and direction of the tilt axis) from solvePnP with the
-  estimate, against the true pose.
-
-If the uncertainty is right, the true error at a grid point is a 2-D error with covariance
-Sigma_p, so its squared Mahalanobis distance averages 2 and |error| / sigma stays below ~2.5 for
-95 % of the points.
+Calibrates from growing random sets of the detected views of a synthetic dataset and compares
+the predicted uncertainty map with the true error map, and the estimated board tilts with the
+true ones. If the uncertainty is right, the squared Mahalanobis distance of the true error
+averages 2.
 
 Usage (venv active, from the repository root):
     python utility/uncertainty_prototype.py dataset/synthetic [--runs 20]
@@ -49,10 +36,9 @@ GROUPS = {'focal': (0, 1), 'centre': (2, 3), 'distortion': (4, 5, 6, 7, 8)}
 
 def detect_views(dataset, truth, cache):
     """
-    Views [(file, mode, object_points, image_points, true_rvec)] that pass the node's checks.
+    Return the views [(file, mode, object_points, image_points, true_rvec)] passing the checks.
 
-    Border rule (10 px) and corner check (0.1 squares) as in the node's defaults; motion and new
-    view checks do not apply to single images. Cached in the file cache.
+    Border rule and corner check as the node's defaults; cached in the file cache.
     """
     if cache.exists():
         data = np.load(cache, allow_pickle=True)
@@ -87,13 +73,7 @@ def calibrate(views, size, fix_k3):
 
 
 def intrinsic_covariance(views, K, D, rvecs, tvecs, fix_k3):
-    """
-    Covariance of the estimated intrinsics and the point noise: (Sigma (n, n), sigma, used).
-
-    used: indices into INTRINSICS of the estimated parameters (k3 left out if fixed). Gauss-Newton
-    normal equations over all views, the 6 pose parameters per view eliminated with the Schur
-    complement; sigma^2 = sum of squared residuals / degrees of freedom.
-    """
+    """Return (covariance of the intrinsics, point noise, indices into INTRINSICS used)."""
     used = list(range(8 if fix_k3 else 9))
     columns = [6 + i for i in used]  # projectPoints' jacobian: rvec, tvec, fx, fy, cx, cy, dist
     n = len(used)
@@ -116,12 +96,7 @@ def grid_pixels(width, height, step):
 
 
 def projection_covariances(K, D, covariance, used, pixels, width, height):
-    """
-    (N, 2, 2) covariance of where the estimate projects the ray through each pixel; NaN invalid.
-
-    Rays from the estimate itself (its inverse lens model); first order: J Sigma J^T with J the
-    projection's derivative by the intrinsics.
-    """
+    """(N, 2, 2) covariance of where the estimate projects the ray through each pixel."""
     rays = pixel_rays(Camera('pinhole', width, height, K, D), pixels)
     result = np.full((len(pixels), 2, 2), np.nan)
     valid = np.isfinite(rays[:, 0])
@@ -151,13 +126,7 @@ def true_errors(camera, K, D, pixels):
 # ---------------------------------------------------------------------------------- board tilt
 
 def tilt(rvec):
-    """
-    (tilt angle, tilt axis direction in the image) of a board pose, degrees.
-
-    Tilt: angle between the board normal and the optical axis. Tilt axis: the board line that
-    stays at constant depth, as an angle in the image plane in [0, 180) (0: horizontal axis, top
-    or bottom edge nearer; 90: vertical axis, left or right edge nearer).
-    """
+    """(tilt angle, tilt axis direction in the image) of a board pose, degrees."""
     normal = cv2.Rodrigues(np.asarray(rvec, np.float64))[0][:, 2]
     angle = np.degrees(np.arccos(min(abs(normal[2]), 1.0)))
     axis = (np.degrees(np.arctan2(normal[1], normal[0])) + 90.0) % 180.0

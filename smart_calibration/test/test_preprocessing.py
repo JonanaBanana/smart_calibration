@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from smart_calibration.preprocessing import (
-    preprocess, preprocess_with_histograms, s_curve, tone_curve)
+    preprocess, preprocess_with_histograms, s_curve, to_mono8, tone_curve)
 
 
 def test_full_range_stretch_maps_min_and_max_to_0_and_255():
@@ -83,7 +83,7 @@ def test_s_curve_is_mirror_symmetric_in_the_midpoint():
 
 
 def test_s_curve_does_not_collapse_near_the_ends():
-    # Regression: with a power-function warp, midpoints close to 1 sent all lower values to 0.
+    # Midpoints close to 1 must not send all lower values to 0.
     x = np.linspace(0, 1, 1001)
     for midpoint in (0.02, 0.5, 0.85, 0.95, 0.99):
         y = s_curve(x, 12.0, midpoint)
@@ -98,3 +98,30 @@ def test_s_curve_slope_at_midpoint_depends_on_strength_only():
         for midpoint in (0.1, 0.5, 0.85):
             low, high = s_curve([midpoint - step, midpoint + step], strength, midpoint)
             assert abs((high - low) / (2 * step) - expected) < 1e-2 * expected
+
+
+def test_uint8_is_returned_unchanged():
+    image = np.arange(12, dtype=np.uint8).reshape(3, 4)
+    assert to_mono8(image) is image
+
+
+def test_12bit_in_uint16_uses_full_8bit_range():
+    image = np.array([[0, 2048, 4095]], dtype=np.uint16)
+    np.testing.assert_array_equal(to_mono8(image), [[0, 128, 255]])
+
+
+def test_float_with_nan_and_negative_values():
+    image = np.array([[np.nan, -1.0, 0.5, 1.0, np.inf]], dtype=np.float32)
+    np.testing.assert_array_equal(to_mono8(image), [[0, 0, 128, 255, 0]])
+
+
+def test_all_zero_image():
+    image = np.zeros((2, 2), dtype=np.uint16)
+    out = to_mono8(image)
+    assert out.dtype == np.uint8
+    np.testing.assert_array_equal(out, 0)
+
+
+def test_to_mono8_rejects_multi_channel_images():
+    with pytest.raises(ValueError):
+        to_mono8(np.zeros((2, 2, 3), dtype=np.uint16))

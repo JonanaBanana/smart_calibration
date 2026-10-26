@@ -22,15 +22,15 @@ from smart_calibration.calibration import calibrate_views, final_calibration, su
 from smart_calibration.calibration_file import output_path, write_calibration
 from smart_calibration.detection import BOARD_MODES, detect_board, sb_flags
 from smart_calibration.environment import check_environment
-from smart_calibration.image_preprocessing import FLOAT_MONO_ENCODINGS, SIXTEEN_BIT_ENCODINGS
-from smart_calibration.preprocessing import preprocess, preprocess_with_histograms
+from smart_calibration.preprocessing import (
+    FLOAT_MONO_ENCODINGS, preprocess, preprocess_with_histograms, SIXTEEN_BIT_ENCODINGS)
 from smart_calibration.qos import image_qos
 from smart_calibration.views import Assessment, reference_outline, ViewCollection
 from smart_calibration_interfaces.msg import (
     BoardDetection, CalibrationState, FinalCalibration, ToneHistogram)
 from smart_calibration_interfaces.srv import Finish, GetView
 
-# Parameters that can be changed while the node runs (e.g. from the GUI's controls).
+# Parameters that can be changed while the node runs.
 LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
                    'contrast_strength', 'contrast_midpoint',
                    'detector_normalize', 'detector_exhaustive', 'detector_accuracy',
@@ -39,10 +39,10 @@ LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
                    'free_k3_after_views', 'uncertainty_scale', 'outlier_z_limit',
                    'outlier_min_views', 'outlier_max_uncertainty_increase',
                    'outlier_max_fraction', 'output_file')
-# Thumbnails of the kept views (what the detector saw), for the GUI's final calibration view.
+# Thumbnails of the kept views, for the GUI.
 THUMBNAIL_WIDTH = 320
 THUMBNAIL_JPEG_QUALITY = 80
-# FinalCalibration states in which a final pass result exists.
+# FinalCalibration states with a result.
 RESULT_STATES = (FinalCalibration.STATE_DONE, FinalCalibration.STATE_ACCEPTED)
 
 
@@ -53,14 +53,14 @@ def float_range(low, high, description):
 
 
 def check_result(value, ok):
-    """(check status, value) for a BoardDetection; None means not evaluated / not measurable."""
+    """Return (check status, value) for a BoardDetection; None: not evaluated."""
     status = (BoardDetection.CHECK_NOT_EVALUATED if ok is None
               else BoardDetection.CHECK_PASSED if ok else BoardDetection.CHECK_FAILED)
     return status, math.nan if value is None else value
 
 
 def fill_checks(detection, assessment):
-    """Copy the view selection checks into a BoardDetection (assessment None: no board)."""
+    """Copy the view checks into a BoardDetection (assessment None: no board)."""
     if assessment is None:
         assessment = Assessment(None, None, None, None, None, None, None)
     detection.speed_check, detection.board_speed = check_result(
@@ -73,7 +73,7 @@ def fill_checks(detection, assessment):
 
 
 def calibration_message(result, header):
-    """Fill a CalibrationState message from a calibration.CalibrationResult."""
+    """Return a CalibrationState message for a CalibrationResult."""
     state = CalibrationState()
     state.header = header
     state.image_width, state.image_height = result.image_size
@@ -100,7 +100,7 @@ def calibration_message(result, header):
 
 
 def jpeg(gray, max_width, quality):
-    """JPEG bytes of a gray image, downscaled to at most max_width."""
+    """Return a gray image as JPEG bytes, downscaled to at most max_width."""
     if gray.shape[1] > max_width:
         scale = max_width / gray.shape[1]
         gray = cv2.resize(gray, (max_width, round(gray.shape[0] * scale)),
@@ -118,7 +118,7 @@ def compressed_image(data, header=None):
 
 
 def fill_final(msg, result, image_points, image_size, header):
-    """Fill a FinalCalibration's view outlines and results (result: FinalResult or None)."""
+    """Fill a FinalCalibration's view outlines and result (FinalResult or None)."""
     msg.total_views = len(image_points)
     msg.image_width, msg.image_height = image_size
     for points in image_points:
@@ -148,7 +148,7 @@ def without_text(uncertainty_ratio):
 
 
 class Cancelled(Exception):
-    """The final pass was cancelled (collection resumed while it ran)."""
+    """The final pass was cancelled."""
 
 
 def format_value(value, spec):
@@ -159,98 +159,79 @@ class CalibrationNode(Node):
 
     def __init__(self):
         super().__init__('calibration_node')
-        # Logged so it is obvious which interpreter / OpenCV the node runs on (system vs. venv).
         self.get_logger().info(
             f'python {sys.executable}, OpenCV {cv2.__version__}, numpy {np.__version__}')
 
         self.board_mode = self.declare_parameter('board_mode', 'chessboard', ParameterDescriptor(
-            description='chessboard: plain chessboard of board_cols x board_rows inner corners, '
-                        'completely visible. oversized_marker: radon checkerboard with three '
-                        'marker dots, larger than the view (see detection.py).')).value
+            description='chessboard: plain board_cols x board_rows chessboard. '
+                        'oversized_marker: radon checkerboard with markers, larger than the '
+                        'view.')).value
         if self.board_mode not in BOARD_MODES:
             raise ValueError(f'board_mode must be one of {BOARD_MODES}, got {self.board_mode!r}')
         corner_count = ParameterDescriptor(
-            description='Inner corners of the chessboard along this axis (board_mode '
-                        'chessboard only).',
+            description='Inner corners along this axis (chessboard mode).',
             integer_range=[IntegerRange(from_value=3, to_value=100, step=1)])
         self.board_cols = self.declare_parameter('board_cols', 9, corner_count).value
         self.board_rows = self.declare_parameter('board_rows', 6, corner_count).value
         self.square_size = self.declare_parameter('square_size', 0.025, float_range(
-            0.001, 1.0, 'Side length of one chessboard square in metres (measure the printed '
-                        'board). Scales the board poses only, not the intrinsics.')).value
-        # findChessboardCornersSB flags (see detection.py and explore.md).
+            0.001, 1.0, 'Side length of one square in metres.')).value
+        # findChessboardCornersSB flags.
         self.declare_parameter('detector_normalize', False, ParameterDescriptor(
             description='Histogram equalization before detection.'))
         self.declare_parameter('detector_exhaustive', True, ParameterDescriptor(
-            description='More exhaustive search: higher detection rate, slower.'))
+            description='Longer search: finds the board more often, slower.'))
         self.declare_parameter('detector_accuracy', True, ParameterDescriptor(
-            description='Internal 2x upsampling: more accurate corners, ~4x slower.'))
+            description='More accurate corners, ~4x slower.'))
 
-        # Preprocessing (see preprocessing.py).
+        # Preprocessing.
         self.declare_parameter('gamma', 1.0, float_range(
-            0.2, 5.0, 'Gamma applied after the contrast stretch; > 1 brightens dark regions.'))
+            0.2, 5.0, 'Gamma after the contrast stretch; > 1 brightens dark regions.'))
         self.declare_parameter('stretch_low_percentile', 0.5, float_range(
             0.0, 50.0, 'Intensity percentile mapped to black.'))
         self.declare_parameter('stretch_high_percentile', 99.5, float_range(
             50.0, 100.0, 'Intensity percentile mapped to white.'))
         self.declare_parameter('contrast_strength', 0.0, float_range(
-            0.0, 10.0, 'Steepness of the S-shaped contrast curve after gamma (0: off).'))
+            0.0, 10.0, 'Steepness of the contrast curve after gamma (0: off).'))
         self.declare_parameter('contrast_midpoint', 0.5, float_range(
-            0.0, 1.0, 'Grey level (0-1) the contrast curve keeps; darker gets darker, lighter '
-                      'gets lighter. Best between the dark and light squares\' histogram peaks.'))
-        # View selection (see views.py).
+            0.0, 1.0, 'Grey level (0-1) the contrast curve keeps.'))
+        # View selection.
         self.declare_parameter('max_board_speed', 100.0, float_range(
-            1.0, 10000.0, 'Detections are only kept while the board moves at most this many '
-                          'pixels per second (mean corner movement), against motion blur.'))
+            1.0, 10000.0, 'Largest board speed of a kept view, pixels per second.'))
         self.declare_parameter('max_corner_residual', 0.1, float_range(
-            0.0, 10.0, 'Detections are only kept if no corner is further than this (in square '
-                       'sizes) from where a quadratic surface through its neighbours puts it: '
-                       'rejects frames with a misplaced corner or a deformed region.'))
+            0.0, 10.0, 'Largest corner distance from where its neighbours put it, in '
+                       'squares.'))
         self.declare_parameter('border_margin_px', 10.0, float_range(
-            0.0, 200.0, 'Corners closer than this to the image border (or outside it) are not '
-                        'used: the detector may predict or mismatch corners there.'))
+            0.0, 200.0, 'Corners closer than this to the image border are not used.'))
         self.declare_parameter('min_view_distance', 0.2, float_range(
-            0.0, 5.0, 'A detection is only kept if its board outline differs from every kept '
-                      'view by at least this much: mean distance of the four outline corners, '
-                      'in board sizes (mean outline side length), so near and far boards are '
-                      'judged alike.'))
-        # Background calibration (see calibration.py).
+            0.0, 5.0, 'Smallest outline distance to every kept view, in board sizes.'))
+        # Background calibration.
         self.declare_parameter('calibrate_every_views', 3, ParameterDescriptor(
-            description='Calibrate in the background each time this many new views were kept.',
+            description='Calibrate each time this many new views were kept.',
             integer_range=[IntegerRange(from_value=1, to_value=1000, step=1)]))
         self.declare_parameter('min_calibration_views', 5, ParameterDescriptor(
-            description='First background calibration once this many views were kept.',
+            description='First calibration at this many views.',
             integer_range=[IntegerRange(from_value=3, to_value=1000, step=1)]))
         self.declare_parameter('free_k3_after_views', 20, ParameterDescriptor(
-            description='Distortion coefficient k3 stays 0 while fewer views than this are '
-                        'used: with few views it makes the distortion run wild where no corners '
-                        'are.',
+            description='k3 stays 0 below this many views.',
             integer_range=[IntegerRange(from_value=0, to_value=10000, step=1)]))
         self.declare_parameter('uncertainty_scale', 2.0, float_range(
-            0.1, 100.0, 'Multiplies the calibration\'s estimated uncertainties: they assume '
-                        'independent corner errors and come out ~1.5-2.5x too small on synthetic '
-                        'data.'))
-        # Final calibration pass (see calibration.final_calibration).
+            0.1, 100.0, 'Factor on the estimated uncertainties.'))
+        # Final calibration pass.
         self.declare_parameter('outlier_z_limit', 6.0, float_range(
-            1.0, 100.0, 'Final pass: a view is an outlier candidate if its leave-one-out error '
-                        '(how badly the other views predict it) has a robust z-score above this '
-                        'among all views.'))
+            1.0, 100.0, 'Robust z-score of the leave-one-out error that flags a view.'))
         self.declare_parameter('outlier_min_views', 15, ParameterDescriptor(
-            description='Final pass: no outlier check with fewer views (the check is unreliable '
-                        'with few).',
+            description='No outlier check with fewer views.',
             integer_range=[IntegerRange(from_value=3, to_value=10000, step=1)]))
         self.declare_parameter('outlier_max_uncertainty_increase', 1.5, float_range(
-            1.0, 1000.0, 'Final pass: a candidate is only removed if that raises the mean '
-                         'uncertainty over the image by at most this factor; otherwise no other '
-                         'view covers its region and it is kept as a suspect.'))
+            1.0, 1000.0, 'A flagged view is kept if removing it raises the mean uncertainty '
+                         'by more than this factor.'))
         self.declare_parameter('outlier_max_fraction', 0.1, float_range(
-            0.0, 0.5, 'Final pass: at most this fraction of the views is removed.'))
+            0.0, 0.5, 'Largest fraction of the views removed.'))
         self.declare_parameter(
             'output_file', '~/.ros/smart_calibration/calibration_%Y-%m-%d_%H-%M-%S.yaml',
             ParameterDescriptor(
-                description='Where Accept saves the calibration (OpenCV YAML), on the machine '
-                            'running this node; strftime placeholders (%Y, %m, ...) and ~ work.'))
-        # Live parameter values, read once per frame by the worker.
+                description='Where Accept saves the calibration; strftime placeholders and ~ '
+                            'work.'))
         self.live = {name: self.get_parameter(name).value for name in LIVE_PARAMETERS}
 
         self.preview_max_width = self.declare_parameter(
@@ -264,25 +245,23 @@ class CalibrationNode(Node):
 
         self.bridge = CvBridge()
         self.image_size = None  # (width, height) of the incoming images
-        # Kept views, their thumbnails and the final pass state; used from the detection and
-        # calibration threads and the service callbacks, always under _lock.
+        # Guards the views, thumbnails and final pass state below.
         self._lock = threading.Lock()
         self.views = ViewCollection(self.square_size, reference_outline(
             self.board_mode, self.board_cols, self.board_rows))
         self.thumbnails = []  # JPEG bytes per kept view
         self._state = FinalCalibration.STATE_COLLECTING
         self._stage = ''
-        self._run = 0  # increases with every final pass (and when one is cancelled)
+        self._run = 0  # increases with every final pass and cancellation
         self._final = None  # FinalResult of the current pass
-        self._final_views = None  # (image points per view, image size) the pass started from
+        self._final_views = None  # (image points per view, image size) of the pass
 
         self.detection_pub = self.create_publisher(BoardDetection, '~/detection', 10)
-        # The image the detector works on, for display (the GUI does not need the raw stream).
         self.preview_pub = self.create_publisher(
             CompressedImage, '~/preview', QoSProfile(depth=2))
         self.histogram_pub = self.create_publisher(
             ToneHistogram, '~/histogram', QoSProfile(depth=2))
-        # Transient local: a GUI started later still gets the newest calibration.
+        # Transient local: a GUI started later still gets them.
         self.calibration_pub = self.create_publisher(
             CalibrationState, '~/calibration',
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -294,15 +273,14 @@ class CalibrationNode(Node):
         self.create_service(Trigger, '~/accept', self.on_accept)
         self.create_service(GetView, '~/get_view', self.on_get_view)
 
-        # Detection is slower than the camera, so it runs in a worker thread on the newest frame
-        # only; frames that arrive while it is busy are dropped. The image callback never blocks.
+        # Detection runs in a worker thread on the newest frame; frames arriving meanwhile are
+        # dropped.
         self._frame_ready = threading.Condition()
         self._latest_msg = None
         self._stopping = False
         self._worker = threading.Thread(target=self._detection_loop, daemon=True)
         self._worker.start()
-        # Calibration takes up to seconds with many views, so it runs in its own thread, on the
-        # newest request only (OpenCV releases the GIL, detection keeps running meanwhile).
+        # Calibration runs in its own thread, on the newest request only.
         self._calibration_ready = threading.Condition()
         self._calibration_request = None
         self._requested_views = 0  # view count of the last calibration request
@@ -315,8 +293,7 @@ class CalibrationNode(Node):
             'image_qos', 'auto', ParameterDescriptor(
                 description='Camera subscription reliability: auto (match the publisher), '
                             'reliable or best_effort.')).value)
-        # Registered after all declarations: rclpy also runs it for declare_parameter(), and it
-        # rejects every parameter that is not live.
+        # After all declarations: it rejects parameters that are not live.
         self.add_on_set_parameters_callback(self.on_set_parameters)
         self.image_sub = self.create_subscription(Image, 'image', self.image_callback, qos)
         if self.board_mode == 'chessboard':
@@ -341,7 +318,7 @@ class CalibrationNode(Node):
             return SetParametersResult(
                 successful=False,
                 reason='stretch_low_percentile must be below stretch_high_percentile')
-        self.live = live  # replaced as a whole, so the worker never sees a half-updated set
+        self.live = live  # replaced as a whole for the worker thread
         return SetParametersResult(successful=True)
 
     def image_callback(self, msg):
@@ -359,10 +336,8 @@ class CalibrationNode(Node):
                 msg, self._latest_msg = self._latest_msg, None
             try:
                 self.process_frame(msg)
-            except Exception as error:  # keep the worker alive whatever goes wrong
-                if not self.context.ok():
-                    # Ctrl+C shuts the ROS context down before destroy_node() stops this thread,
-                    # so a detection finishing in between cannot be published any more.
+            except Exception as error:  # keep the worker alive
+                if not self.context.ok():  # shutting down
                     return
                 self.get_logger().error(
                     f'frame processing failed: {error!r}', throttle_duration_sec=5.0)
@@ -374,7 +349,7 @@ class CalibrationNode(Node):
         live = self.live
         tone = (live['stretch_low_percentile'], live['stretch_high_percentile'], live['gamma'],
                 live['contrast_strength'], live['contrast_midpoint'])
-        # Preview and histograms only while something (the GUI) is watching.
+        # Preview and histograms only while the GUI is watching.
         watched = self.preview_pub.get_subscription_count() > 0
         if watched:
             gray, before, after = preprocess_with_histograms(image, *tone)
@@ -389,7 +364,6 @@ class CalibrationNode(Node):
                 self.get_logger().info(
                     f'receiving {size[0]}x{size[1]} images, encoding {msg.encoding!r}')
             else:
-                # Intrinsics are only valid for one resolution.
                 self.get_logger().warn(
                     f'image size changed from {self.image_size[0]}x{self.image_size[1]} '
                     f'to {size[0]}x{size[1]}')
@@ -419,7 +393,7 @@ class CalibrationNode(Node):
         with self._lock:
             if board is not None:
                 stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-                # After Finish the checks still run (for the status box), but nothing is kept.
+                # After Finish, frames are still checked but not kept.
                 assessment = self.views.consider(
                     board, size, stamp, live['max_board_speed'], live['max_corner_residual'],
                     live['min_view_distance'],
@@ -431,7 +405,7 @@ class CalibrationNode(Node):
             detection.kept_views = len(self.views)
         fill_checks(detection, assessment)
 
-        # Preview first: the GUI pairs both by timestamp and shows a pair once it is complete.
+        # Preview first: the GUI pairs both by timestamp.
         if watched:
             self.preview_pub.publish(self.make_preview(gray, msg.header))
             self.histogram_pub.publish(histogram)
@@ -452,9 +426,9 @@ class CalibrationNode(Node):
 
     def request_calibration(self, live, header, force=False):
         """
-        Hand the kept views to the calibration thread if enough new ones were kept (under _lock).
+        Queue a background calibration if enough new views were kept (call under _lock).
 
-        force: whenever there are enough views (e.g. after views were removed).
+        force: whenever there are enough views.
         """
         count = len(self.views)
         if count < live['min_calibration_views'] or (
@@ -466,7 +440,7 @@ class CalibrationNode(Node):
                                  live['free_k3_after_views'], live['uncertainty_scale']))
 
     def _queue_calibration(self, request):
-        """Replace any waiting calibration request (only the newest matters)."""
+        """Replace any waiting calibration request."""
         with self._calibration_ready:
             self._calibration_request = request
             self._calibration_ready.notify()
@@ -504,7 +478,7 @@ class CalibrationNode(Node):
     # ------------------------------------------------------------------ final calibration pass
 
     def run_final(self, run, objects, images, size, keep, live):
-        """Run the final pass of final run number run, unless it is cancelled meanwhile."""
+        """Run the final pass number run, unless it is cancelled meanwhile."""
         def progress(text):
             with self._lock:
                 if self._run != run:
@@ -586,7 +560,7 @@ class CalibrationNode(Node):
             if self._state == FinalCalibration.STATE_COLLECTING:
                 response.message = 'already collecting'
                 return response
-            # Removed views are dropped: they were judged bad (restored ones were not removed).
+            # Removed views are dropped.
             removed = [view.index for view in self._final.removed] if (
                 self._final is not None and self._state in RESULT_STATES) else []
             self.views.remove(removed)
@@ -651,14 +625,13 @@ class CalibrationNode(Node):
                                 header)
 
     def prepare_image(self, msg):
-        """Convert an Image message to a single-channel image at its bit depth, None on failure."""
+        """Convert an Image message to a single-channel image at its bit depth, or None."""
         try:
             if msg.encoding in SIXTEEN_BIT_ENCODINGS:
                 return self.bridge.imgmsg_to_cv2(msg, 'mono16')
             if msg.encoding in FLOAT_MONO_ENCODINGS:
                 return self.bridge.imgmsg_to_cv2(msg, 'passthrough')
-            # cv_bridge handles 8-bit color, Bayer and YUV encodings.
-            return self.bridge.imgmsg_to_cv2(msg, 'mono8')
+            return self.bridge.imgmsg_to_cv2(msg, 'mono8')  # also color, Bayer and YUV
         except (CvBridgeError, ValueError) as error:
             self.get_logger().error(
                 f'cannot convert image with encoding {msg.encoding!r}: {error}',
@@ -671,8 +644,7 @@ class CalibrationNode(Node):
             self._frame_ready.notify()
         with self._calibration_ready:
             self._calibration_ready.notify()
-        # Bounded wait: a detection in progress finishes within a fraction of a second. A
-        # calibration may take longer; its thread is a daemon and does not hold up the exit.
+        # The calibration thread is a daemon: a long calibration does not hold up the exit.
         self._worker.join(timeout=2.0)
         self._calibrator.join(timeout=0.5)
         super().destroy_node()
@@ -691,8 +663,7 @@ def main(args=None):
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        # On Ctrl+C under ros2 launch the node gets SIGINT twice (terminal + launch forwarding);
-        # ignore the second one so it cannot interrupt the cleanup below.
+        # ros2 launch forwards a second SIGINT.
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.destroy_node()
         rclpy.try_shutdown()

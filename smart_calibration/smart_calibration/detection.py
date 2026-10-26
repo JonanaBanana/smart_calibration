@@ -1,16 +1,12 @@
 """
-Chessboard detection on prepared 8-bit grayscale images.
+Chessboard detection on 8-bit grayscale images.
 
-Two board modes (chosen at startup):
+Board modes:
 
-- 'chessboard': a plain chessboard with a known number of inner corners, completely visible.
-  The corners are numbered from the first detected corner; the detector may number them from
-  the opposite end of the board in another frame.
-- 'oversized_marker': a radon checkerboard with three marker dots in an L near its middle, larger
-  than the camera's view (findChessboardCornersSB with CALIB_CB_LARGER | CALIB_CB_MARKER). Each
-  frame shows a different part of it with a different number of corners; the markers fix the
-  board's orientation and origin, so every corner gets consistent board coordinates. The L must
-  have exactly one white marker cell (black dot): its top-left corner is the origin.
+- 'chessboard': a plain chessboard with a known number of inner corners, completely visible. It
+  may be numbered from either end.
+- 'oversized_marker': a radon checkerboard larger than the view, with three marker dots in an L
+  that fix its orientation and origin (the top-left corner of the one white marker cell).
 """
 
 from dataclasses import dataclass, replace
@@ -19,26 +15,20 @@ import cv2
 import numpy as np
 
 BOARD_MODES = ('chessboard', 'oversized_marker')
-# Smallest grid (cols, rows of inner corners) asked for in oversized_marker mode. The marker test
-# skips the cells on the edge of the detected grid, so smaller boards are never found with
-# markers anyway (measured with OpenCV 4.11 on synthetic views).
+# Smallest grid (cols, rows) detected in oversized_marker mode; smaller ones carry no markers.
 MARKER_MIN_PATTERN = (5, 5)
-# Value of findChessboardCornersSBWithMeta's meta output at the origin corner: the top-left
-# corner of a white cell with a black marker dot.
+# findChessboardCornersSBWithMeta's meta value at the origin corner.
 META_ORIGIN = 4
 
 
 @dataclass(frozen=True)
 class DetectedBoard:
     """
-    Detected corners and where they are on the board.
+    Detected corners and their position on the board.
 
-    corners: (rows, cols, 2) float32 pixel positions of the detected grid, row-major, pixel centres
-    at integer coordinates (OpenCV convention). origin: (row, col) in that grid of the corner with
-    board coordinates (0, 0); the corner at (row, col) has board coordinates (col - origin col,
-    row - origin row), in squares. oriented: True if the markers fix the board's orientation, so
-    board coordinates mean the same physical corner in every frame. valid: (rows, cols) bool,
-    False for corners not to be used (see border_mask); all True if not given.
+    corners: (rows, cols, 2) float32 pixel positions, row-major. origin: (row, col) of the corner
+    with board coordinates (0, 0). oriented: board coordinates name the same physical corner in
+    every frame. valid: (rows, cols) bool, corners to use (default all).
     """
 
     corners: np.ndarray
@@ -66,9 +56,8 @@ def sb_flags(normalize=False, exhaustive=False, accuracy=False):
     """
     Combine findChessboardCornersSB flags.
 
-    See explore.md for what they do and their measured effect: normalize (histogram
-    equalization) helps on dark / low-contrast images, accuracy (internal 2x upsampling) lowers
-    the corner error by 30-45 % at ~4x the runtime, exhaustive made no difference so far.
+    normalize: histogram equalization. exhaustive: longer search. accuracy: 2x upsampling inside
+    the detector, more accurate corners at ~4x the detection time.
     """
     flags = 0
     if normalize:
@@ -81,12 +70,7 @@ def sb_flags(normalize=False, exhaustive=False, accuracy=False):
 
 
 def detect_chessboard(gray, cols, rows, flags=0):
-    """
-    Detect a chessboard with cols x rows inner corners.
-
-    Returns a (rows, cols, 2) float32 array of corner positions in pixels, row-major with pixel
-    centres at integer coordinates (OpenCV convention), or None if no board was found.
-    """
+    """Return the (rows, cols, 2) corners of a cols x rows chessboard, or None."""
     found, corners = cv2.findChessboardCornersSB(gray, (cols, rows), flags=flags)
     if not found:
         return None
@@ -94,12 +78,7 @@ def detect_chessboard(gray, cols, rows, flags=0):
 
 
 def detect_marker_board(gray, flags=0):
-    """
-    Detect an oversized radon checkerboard with markers; return a DetectedBoard or None.
-
-    Also None if the result does not have exactly one origin corner (an L with two white marker
-    cells, or none), so board coordinates are never ambiguous.
-    """
+    """Detect an oversized board with markers; None unless it has exactly one origin."""
     found, corners, meta = cv2.findChessboardCornersSBWithMeta(
         gray, MARKER_MIN_PATTERN, flags | cv2.CALIB_CB_LARGER | cv2.CALIB_CB_MARKER)
     if not found:
@@ -113,12 +92,10 @@ def detect_marker_board(gray, flags=0):
 
 def border_mask(corners, image_size, margin_px):
     """
-    (rows, cols) bool: True for corners at least margin_px inside the image.
+    Return (rows, cols) bool: True for corners at least margin_px inside the image.
 
-    With CALIB_CB_LARGER, findChessboardCornersSB adds whole rows / columns of which up to half
-    may be predicted rather than found: such corners can lie outside the image, and a black square
-    cut off by the image border can be mistaken for a corner. image_size: (width, height); pixel
-    centres at integer coordinates.
+    The detector can predict corners outside the image, or mistake a square cut off by the border
+    for a corner. image_size: (width, height).
     """
     width, height = image_size
     x, y = corners[..., 0], corners[..., 1]
@@ -128,10 +105,10 @@ def border_mask(corners, image_size, margin_px):
 
 def detect_board(gray, mode, cols, rows, flags=0, border_margin_px=0.0):
     """
-    Detect the board of the given mode (see BOARD_MODES); return a DetectedBoard or None.
+    Detect the board of the given mode (BOARD_MODES); return a DetectedBoard or None.
 
-    cols, rows: inner corners of the board in 'chessboard' mode (unused for 'oversized_marker').
-    Corners closer than border_margin_px to the image border (or outside it) are marked invalid.
+    cols, rows: inner corners ('chessboard' only). Corners within border_margin_px of the image
+    border are marked invalid.
     """
     if mode == 'oversized_marker':
         board = detect_marker_board(gray, flags)

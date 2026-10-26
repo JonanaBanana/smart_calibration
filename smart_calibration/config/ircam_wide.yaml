@@ -1,75 +1,49 @@
-# calibration_node settings tuned for the ircam_wide camera and its 6x7 board.
-# Copy this file per camera / board and select it with: params_file:=<path>
-#
-# Live parameters (gamma, stretch_*, detector_*) can also be changed while running, from the GUI
-# or with `ros2 param set /calibration_node <name> <value>`; the rest is read at startup.
+# calibration_node settings for the ircam_wide camera. Select a file with params_file:=<path>.
+# Parameters marked (startup) need a restart; all others can be changed while running, from the
+# GUI or with `ros2 param set /calibration_node <name> <value>`.
 calibration_node:
   ros__parameters:
-    # Board type (startup only): chessboard (plain, completely visible, size below) or
-    # oversized_marker (radon checkerboard larger than the view, with three marker dots in an L
-    # near its middle that has exactly one white marker cell; any visible part of 5x5+ corners).
-    board_mode: chessboard
-    # Chessboard: number of INNER corners (squares - 1) along each axis (chessboard mode only).
-    board_cols: 6
+    # Board (startup)
+    board_mode: chessboard      # chessboard, or oversized_marker (radon board with markers)
+    board_cols: 6               # inner corners (squares - 1), chessboard mode only
     board_rows: 7
-    # Side length of one square in metres. Placeholder: measure the printed board.
-    square_size: 0.1
+    square_size: 0.1            # side of one square, metres
 
-    # Preprocessing: contrast stretch between these intensity percentiles, then gamma.
-    stretch_low_percentile: 0.5
-    stretch_high_percentile: 99.5
-    gamma: 0.6
-    # S-shaped contrast curve after gamma (0: off); midpoint = grey level (0-1) it keeps.
-    contrast_strength: 3.0
-    contrast_midpoint: 0.8
+    # Preprocessing
+    stretch_low_percentile: 0.5     # intensity percentile mapped to black
+    stretch_high_percentile: 99.5   # intensity percentile mapped to white
+    gamma: 0.6                      # > 1 brightens dark regions, < 1 darkens bright ones
+    contrast_strength: 3.0          # steepness of the S-shaped contrast curve, 0: off
+    contrast_midpoint: 0.8          # grey level (0-1) the curve keeps: below darker, above lighter
 
-    # findChessboardCornersSB flags. exhaustive + accuracy gave ~80-90 % detection with this
-    # camera (accuracy also lowers the corner error, at ~4x the detection time).
-    detector_normalize: false
-    detector_exhaustive: true
-    detector_accuracy: false
+    # Detector (findChessboardCornersSB flags)
+    detector_normalize: false   # histogram equalization first
+    detector_exhaustive: true   # longer search: finds the board more often, slower
+    detector_accuracy: false    # more accurate corners, ~4x slower
 
-    # View selection: only keep detections while the board moves at most this many pixels per
-    # second (mean corner movement since the previous detection), against motion blur.
-    max_board_speed: 50.0
-    # ... and only if no corner is misplaced: distance (in square sizes) of each corner from where
-    # a quadratic surface through its neighbours (within 3 squares) puts it. Correct corners stay
-    # below ~0.06 on synthetic views; any corner above the limit discards the whole frame.
-    max_corner_residual: 0.1
-    # Corners closer than this to the image border (or outside it) are not used (the detector
-    # may predict or mismatch corners there); the rest of the frame is.
-    border_margin_px: 10.0
-    # ... and only if the board outline (four outermost corners) differs from every kept view by
-    # at least this much: mean corner distance in board sizes (mean side length of the outline),
-    # so the same movement counts the same near the camera and far from it.
-    min_view_distance: 0.1
+    # View selection: a detection is kept if it passes all three checks
+    max_board_speed: 50.0       # px/s, mean corner movement since the previous frame
+    max_corner_residual: 0.1    # squares, largest corner distance from where its neighbours put it
+    min_view_distance: 0.1      # board sizes, smallest outline difference to every kept view
+    border_margin_px: 10.0      # corners closer to the image border are not used
 
-    # Background calibration from the kept views: first after min_calibration_views views, then
-    # every calibrate_every_views new views. k3 stays 0 below free_k3_after_views views (with few
-    # views it makes the distortion run wild where no corners are). The estimated uncertainty is
-    # multiplied by uncertainty_scale (it comes out ~1.5-2.5x too small on synthetic data).
-    min_calibration_views: 5
-    calibrate_every_views: 3
-    free_k3_after_views: 20
-    uncertainty_scale: 2.0
+    # Background calibration
+    min_calibration_views: 5    # first calibration at this many views
+    calibrate_every_views: 3    # then after every this many new views
+    free_k3_after_views: 20     # k3 stays 0 below this many views
+    uncertainty_scale: 2.0      # factor on the estimated uncertainty, which comes out too small
 
-    # Final calibration (the GUI's Finish button): a view is an outlier candidate if its
-    # leave-one-out error (how badly the other views predict it) has a robust z-score above
-    # outlier_z_limit. It is removed only if that raises the mean uncertainty over the image by at
-    # most outlier_max_uncertainty_increase (else no other view covers its region: kept as a
-    # suspect), at most outlier_max_fraction of the views, and only with outlier_min_views views.
-    outlier_z_limit: 6.0
-    outlier_min_views: 15
-    outlier_max_uncertainty_increase: 1.5
-    outlier_max_fraction: 0.1
-    # Accept saves the calibration here (OpenCV YAML: M, D, reprojection_error, width, height,
-    # distortion_model, calibration_time), on the machine running the node. strftime
-    # placeholders (%Y, %m, %d, %H, %M, %S) and ~ work.
+    # Final calibration (Finish): remove views the other views predict badly
+    outlier_z_limit: 6.0                    # robust z-score that flags a view
+    outlier_min_views: 15                   # no outlier check with fewer views
+    outlier_max_uncertainty_increase: 1.5   # keep a flagged view if removing it raises the
+                                            # mean uncertainty by more than this factor
+    outlier_max_fraction: 0.1               # remove at most this fraction of the views
+
+    # Accept saves the calibration here (on the node's machine; strftime placeholders and ~ work)
     output_file: ~/calibs/opencv_ircam_wide_intrinsics_%Y-%m-%d_%H-%M-%S.yaml
 
-    # Camera subscription: auto matches the camera publisher's reliability.
-    image_qos: auto
-
-    # Preview sent to the GUI.
-    preview_max_width: 1280
+    # Camera and GUI (startup)
+    image_qos: auto             # auto (match the camera), reliable or best_effort
+    preview_max_width: 1280     # preview images to the GUI are downscaled to this width
     preview_jpeg_quality: 80
