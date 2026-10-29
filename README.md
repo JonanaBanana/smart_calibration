@@ -9,8 +9,8 @@ final pass removes outlier views, and the result is saved as an OpenCV YAML file
   <img src="assets/sc_example_1.gif" alt="Collecting calibration views with a thermal camera: live corner detection, view checks and the calibration status">
 </p>
 
-- **Board modes:** a plain chessboard, or an oversized radon checkerboard with markers that only
-  needs to be partly visible
+- **Board modes:** a plain chessboard, or a radon checkerboard with markers that only needs to
+  be partly visible
 - **View checks:** motion, misplaced corners and duplicates are rejected before a view is kept
 - **Live guidance:** an uncertainty map over the image, plus hints on missing view types (tilts,
   image corners)
@@ -164,10 +164,10 @@ calibration_time: "2026-10-26 15:02:11"
 
 - **`chessboard`:** a plain chessboard, always completely visible. Set `board_cols` and
   `board_rows` to its **inner** corners (squares − 1). Leave a white border of about one square.
-- **`oversized_marker`:** a radon checkerboard larger than the camera's view. Three marker dots
-  in an L near its middle fix its orientation and origin. Exactly one of the three must be a black
-  dot in a white cell; that cell's top-left corner is the origin. Any visible part with at least
-  5 × 5 corners and the markers is detected, so the image corners are easy to cover.
+- **`oversized_marker`:** a radon checkerboard that need not be completely visible. Three marker
+  dots in an L near its middle fix its orientation and origin. Exactly one of the three must be a
+  black dot in a white cell; that cell's top-left corner is the origin. Any visible part with at
+  least 5 × 5 corners and the markers is detected, so the image corners are easy to cover.
 
 Generate a board with OpenCV's pattern generator, e.g. 14 × 10 squares of 50 mm with markers in
 cells (7, 4), (8, 4) and (7, 5):

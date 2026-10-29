@@ -5,8 +5,8 @@ Board modes:
 
 - 'chessboard': a plain chessboard with a known number of inner corners, completely visible. It
   may be numbered from either end.
-- 'oversized_marker': a radon checkerboard larger than the view, with three marker dots in an L
-  that fix its orientation and origin (the top-left corner of the one white marker cell).
+- 'oversized_marker': a radon checkerboard, possibly only partly visible, with three marker dots
+  in an L that fix its orientation and origin (the top-left corner of the one white marker cell).
 """
 
 from dataclasses import dataclass, replace

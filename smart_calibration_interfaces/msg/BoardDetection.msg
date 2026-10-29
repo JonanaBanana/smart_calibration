@@ -11,8 +11,8 @@ uint32 image_height
 # False: no board in this frame; cols, rows and corners are then 0 / empty.
 bool found
 
-# Detected grid of inner corners: cols corners per row, rows rows. With an oversized board
-# (board_mode oversized_marker) only part of the board is visible, so this varies per frame.
+# Detected grid of inner corners: cols corners per row, rows rows. With board_mode
+# oversized_marker the board can be partly visible, so this can vary per frame.
 uint32 cols
 uint32 rows
 

@@ -165,8 +165,8 @@ class CalibrationNode(Node):
 
         self.board_mode = self.declare_parameter('board_mode', 'chessboard', ParameterDescriptor(
             description='chessboard: plain board_cols x board_rows chessboard. '
-                        'oversized_marker: radon checkerboard with markers, larger than the '
-                        'view.')).value
+                        'oversized_marker: radon checkerboard with markers, may be partly '
+                        'visible.')).value
         if self.board_mode not in BOARD_MODES:
             raise ValueError(f'board_mode must be one of {BOARD_MODES}, got {self.board_mode!r}')
         corner_count = ParameterDescriptor(
