@@ -1,5 +1,5 @@
 # Background calibration from the kept views and its uncertainty, published by calibration_node
-# every few kept views (see calibration.py). Pinhole model (plumb_bob).
+# every few kept views (see calibration.py).
 
 # stamp: image stamp of the newest view used.
 std_msgs/Header header
@@ -13,19 +13,24 @@ uint32 views
 uint32 points
 float32 duration_ms
 
-# k3 is held at 0 while there are fewer than free_k3_after_views views.
+# Lens model (camera_model parameter): plumb_bob, or fisheye (Kannala-Brandt, cv2.fisheye).
+string camera_model
+
+# k3 (fisheye: k3 and k4) is held at 0 while there are fewer than free_k3_after_views views.
 bool k3_fixed
 
 # Reprojection error (RMS over all corners) and the point noise estimated from it, px.
 float64 rms
 float64 noise
 
-# Camera matrix, row-major (fx 0 cx; 0 fy cy; 0 0 1), and distortion k1, k2, p1, p2, k3.
+# Camera matrix, row-major (fx 0 cx; 0 fy cy; 0 0 1), and distortion in OpenCV's order:
+# plumb_bob k1, k2, p1, p2, k3; fisheye k1, k2, k3, k4.
 float64[9] camera_matrix
-float64[5] distortion
+float64[] distortion
 
-# Standard deviation of fx, fy, cx, cy, k1, k2, p1, p2, k3 (0 if fixed), times uncertainty_scale.
-float64[9] std_deviations
+# Standard deviation of fx, fy, cx, cy and each distortion coefficient (0 if fixed), times
+# uncertainty_scale.
+float64[] std_deviations
 
 # All uncertainties below are multiplied by this (the raw ones underestimate the true error).
 float32 uncertainty_scale

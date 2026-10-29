@@ -9,6 +9,12 @@ __pycache__/
 dataset/
 
 *.svg
+smart_calibration/config/*
+!smart_calibration/config/fisheye_chessboard.yaml
+!smart_calibration/config/fisheye_oversized.yaml
+!smart_calibration/config/plumb_bob_chessboard.yaml
+!smart_calibration/config/plumb_bob_oversized.yaml
+
 
 # IDE / tooling config (keep locally, not in repo)
 .vscode/

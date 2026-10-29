@@ -4,8 +4,9 @@ import cv2
 import numpy as np
 
 from smart_calibration.calibration import (
-    axis_offset, board_tilt, calibrate, calibrate_views, distortion_folds_in_image,
-    final_calibration, FOLD_HINT, map_grid, pose_hints, summary, uncertainty_hints)
+    axis_offset, board_tilt, calibrate_views, final_calibration, FOLD_HINT, map_grid, pose_hints,
+    summary, uncertainty_hints)
+from smart_calibration.camera_models import FISHEYE, PLUMB_BOB
 
 SIZE = (1280, 720)
 CAMERA_MATRIX = np.array([[640.0, 0.0, 639.5], [0.0, 640.0, 359.5], [0.0, 0.0, 1.0]])
@@ -21,14 +22,21 @@ def tilt_rotation(tilt_deg, axis_deg):
     return axis * math.radians(tilt_deg)
 
 
-def views(poses, noise=0.05, seed=0):
+# A wide fisheye: 200 degrees across the diagonal, a monotonic lens.
+FISHEYE_MATRIX = np.array([[400.0, 0.0, 641.0], [0.0, 400.0, 358.0], [0.0, 0.0, 1.0]])
+FISHEYE_DISTORTION = np.array([0.05, -0.01, 0.002, 0.0])
+
+
+def views(poses, noise=0.05, seed=0, model=PLUMB_BOB):
     """Object and image points of the board at (tilt, axis, x, y, distance) poses."""
     rng = np.random.default_rng(seed)
     objects, images = [], []
+    K, D = ((CAMERA_MATRIX, DISTORTION) if model is PLUMB_BOB
+            else (FISHEYE_MATRIX, FISHEYE_DISTORTION))
     for tilt, axis, x, y, distance in poses:
         rvec, tvec = tilt_rotation(tilt, axis), np.array([x, y, distance])
-        pixels, _ = cv2.projectPoints(BOARD.astype(np.float64), rvec, tvec, CAMERA_MATRIX,
-                                      DISTORTION)
+        pixels, _, _ = model.project(BOARD, rvec, tvec, K, D)
+        pixels = pixels.reshape(-1, 1, 2)
         assert ((pixels >= 0) & (pixels < SIZE)).all(), (tilt, axis, x, y, distance)
         objects.append(BOARD)
         images.append((pixels + rng.normal(0.0, noise, pixels.shape)).astype(np.float32))
@@ -42,6 +50,14 @@ VARIED = [(30, a, x, y, d) for a, (x, y, d) in zip(
                         (0.0, 0.1, 0.35), (-0.25, 0.0, 0.5), (0.25, 0.0, 0.5),
                         (0.1, 0.05, 0.3), (-0.1, -0.05, 0.3), (0.0, 0.0, 0.6),
                         (0.15, 0.12, 0.5), (-0.15, -0.12, 0.5), (0.0, 0.0, 0.3)])]
+# The fisheye sees much further out: views up to 70 degrees off the axis.
+FISHEYE_VARIED = [(30, a, x, y, d) for a, (x, y, d) in zip(
+    range(0, 360, 20), [(-0.5, -0.2, 0.25), (0.0, 0.0, 0.3), (0.5, 0.2, 0.25),
+                        (-0.5, 0.2, 0.25), (0.5, -0.2, 0.25), (0.0, -0.15, 0.25),
+                        (0.0, 0.15, 0.25), (-0.7, 0.0, 0.25), (0.7, 0.0, 0.25),
+                        (0.2, 0.1, 0.2), (-0.2, -0.1, 0.2), (0.0, 0.0, 0.5),
+                        (0.35, 0.25, 0.3), (-0.35, -0.25, 0.3), (0.0, 0.0, 0.2),
+                        (-0.6, -0.3, 0.3), (0.6, 0.3, 0.3), (0.6, -0.3, 0.3)])]
 
 
 def test_calibration_recovers_the_camera_and_reports_its_uncertainty():
@@ -129,8 +145,8 @@ def test_leave_one_out_errors_match_recalibrating_without_the_view():
     assert calibrate_views(objects, images, SIZE, 20, 1).leave_one_out is None
     for i in (0, 4):
         rest = [k for k in range(10) if k != i]
-        _, K, D, _, _ = calibrate([objects[k] for k in rest], [images[k] for k in rest], SIZE,
-                                  True)
+        _, K, D, _, _ = PLUMB_BOB.calibrate([objects[k] for k in rest],
+                                            [images[k] for k in rest], SIZE, True)
         _, rvec, tvec = cv2.solvePnP(objects[i], images[i], K, D)
         projected, _ = cv2.projectPoints(objects[i].astype(np.float64), rvec, tvec, K, D)
         exact = np.sqrt(np.mean(np.sum((images[i] - projected)[:, 0] ** 2, axis=1)))
@@ -191,11 +207,11 @@ def test_uncertainty_hints_name_a_weak_focal_length_or_principal_point():
 def test_distortion_folding_inside_the_image():
     # k1 -0.3 alone: turns back at r = 1.05, reaching a distorted radius of 0.70, while the image
     # corners are at 1.15.
-    assert distortion_folds_in_image(CAMERA_MATRIX, [-0.3, 0, 0, 0, 0], SIZE)
-    assert not distortion_folds_in_image(CAMERA_MATRIX, DISTORTION, SIZE)  # never turns back
+    assert PLUMB_BOB.folds_in_image(CAMERA_MATRIX, [-0.3, 0, 0, 0, 0], SIZE)
+    assert not PLUMB_BOB.folds_in_image(CAMERA_MATRIX, DISTORTION, SIZE)  # never turns back
     # Turns back, but only beyond the image corners (a narrow image).
     narrow = [[640.0, 0.0, 199.5], [0.0, 640.0, 149.5], [0.0, 0.0, 1.0]]
-    assert not distortion_folds_in_image(narrow, [-0.3, 0, 0, 0, 0], (400, 300))
+    assert not PLUMB_BOB.folds_in_image(narrow, [-0.3, 0, 0, 0, 0], (400, 300))
     result = calibrate_views(*views(VARIED), SIZE, 20, 1)
     assert not result.distortion_folds and FOLD_HINT not in result.hints
 
@@ -208,3 +224,55 @@ def test_summary_lists_the_result():
     assert lines[0] == '  image        1280 x 720, plumb_bob'
     assert lines[1] == '  views        14 used, 1 removed, k3 fixed'
     assert lines[4].split()[:2] == ['fx', 'fy'] and len(lines) == 8
+
+
+def test_fisheye_calibration_recovers_the_camera():
+    objects, images = views(FISHEYE_VARIED, model=FISHEYE)
+    result = calibrate_views(objects, images, SIZE, 0, 1, model=FISHEYE)
+    assert result.camera_model is FISHEYE and not result.k3_fixed
+    assert np.abs(result.camera_matrix - FISHEYE_MATRIX).max() < 1.0
+    # The lens is recovered where the views reach, up to 70 degrees off the axis.
+    theta = np.radians(np.linspace(5, 70, 14))
+    np.testing.assert_allclose(FISHEYE.distorted_radius(theta, result.distortion),
+                               FISHEYE.distorted_radius(theta, FISHEYE_DISTORTION), atol=1e-3)
+    assert result.rms < 0.1 and abs(result.noise - 0.05) < 0.01
+    assert result.distortion.shape == (4,) and result.std_deviations.shape == (8,)
+    assert np.all(result.std_deviations > 0)
+    # The model reaches the image corners, 105 degrees off the axis: a map value everywhere.
+    assert np.isfinite(result.uncertainty_map).all() and not result.distortion_folds
+    assert result.hints == ()
+    few = calibrate_views(objects, images, SIZE, 20, 1, model=FISHEYE)
+    assert few.k3_fixed and np.all(few.std_deviations[6:] == 0) and np.all(few.distortion[2:] == 0)
+
+
+def test_fisheye_leave_one_out_errors_match_recalibrating_without_the_view():
+    objects, images = views(FISHEYE_VARIED[:12], model=FISHEYE)
+    result = calibrate_views(objects, images, SIZE, 0, 1, with_leave_one_out=True, model=FISHEYE)
+    for i in (0, 7):
+        rest = [k for k in range(12) if k != i]
+        _, K, D, _, _ = FISHEYE.calibrate([objects[k] for k in rest],
+                                          [images[k] for k in rest], SIZE, False)
+        rays = FISHEYE.rays(K, D, images[i].reshape(-1, 2))
+        # The view's pose with the others' calibration: PnP on the rays (an ideal camera).
+        _, rvec, tvec = cv2.solvePnP(objects[i], (rays[:, :2] / rays[:, 2:]).astype(np.float32),
+                                     np.eye(3), None)
+        for _ in range(10):  # Gauss-Newton on the pixels
+            projected, _, by_pose = FISHEYE.project(objects[i], rvec, tvec, K, D)
+            step = np.linalg.lstsq(by_pose, (images[i].reshape(-1, 2) - projected).ravel(),
+                                   rcond=None)[0]
+            rvec, tvec = rvec.ravel() + step[:3], tvec.ravel() + step[3:]
+        projected, _, _ = FISHEYE.project(objects[i], rvec, tvec, K, D)
+        exact = np.sqrt(np.mean(np.sum((images[i].reshape(-1, 2) - projected) ** 2, axis=1)))
+        assert abs(result.leave_one_out[i] / exact - 1) < 0.05
+
+
+def test_fisheye_final_calibration_removes_a_bent_view():
+    objects, images = views(FISHEYE_VARIED, model=FISHEYE)
+    images[6] = bent(images[6], 3.0)
+    result = final(objects, images, model=FISHEYE)
+    assert [view.index for view in result.removed] == [6]
+    assert result.final.camera_model is FISHEYE
+    lines = summary(result).splitlines()
+    assert lines[0] == '  image        1280 x 720, fisheye'
+    assert lines[1] == '  views        17 used, 1 removed, k3, k4 fixed'
+    assert lines[-1].split()[:4] == ['k1', 'k2', 'k3', 'k4'] and len(lines) == 7

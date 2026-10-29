@@ -4,11 +4,12 @@ Calibration files in OpenCV's YAML format (cv2.FileStorage).
     %YAML:1.0
     ---
     M: !!opencv-matrix        camera matrix, 3 x 3
-    D: !!opencv-matrix        distortion coefficients, n x 1 (plumb_bob: k1, k2, p1, p2, k3)
+    D: !!opencv-matrix        distortion coefficients, n x 1 (plumb_bob: k1, k2, p1, p2, k3;
+                              fisheye: k1, k2, k3, k4)
     reprojection_error: ...   RMS over all corners, px
     width: ...
     height: ...
-    distortion_model: plumb_bob
+    distortion_model: plumb_bob or fisheye
     calibration_time: "YYYY-MM-DD hh:mm:ss"
 """
 

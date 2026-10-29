@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 from smart_calibration.gui.histogram_widget import HistogramWidget
 from smart_calibration.gui.parameter_slider import ParameterSlider
 from smart_calibration.gui.strip_plot import StripPlot
+from smart_calibration.camera_models import camera_model
 from smart_calibration.gui.undistortion import Undistortion
 from smart_calibration.gui.video_widget import VideoWidget
 from smart_calibration_interfaces.msg import BoardDetection, FinalCalibration
@@ -77,7 +78,7 @@ def status_lines(detection, kept_label=None):
         return [('board', 'not found', '', 'fail')] + [
             (label, '-', '', 'unknown') for label in ('motion', 'corners', 'new view')]
     lines = [('board', 'found', '', 'pass'),
-             check_line('motion', detection.speed_check, f'{detection.board_speed:.0f} px/s'),
+             check_line('motion', detection.speed_check, f'{detection.board_speed:.3f} w/s'),
              check_line('corners', detection.residual_check, f'{detection.corner_residual:.2f}')]
     if kept_label:
         lines.append(('new view', kept_label, '', 'kept'))
@@ -118,6 +119,14 @@ CALIBRATION_ROWS = (('board', 'board:'), ('phase', 'phase:'), ('views', 'views:'
                     ('rms', 'rms:'), ('uncertainty', 'uncertainty:'))
 
 
+def fixed_text(calibration):
+    """Return the coefficients a CalibrationState holds at 0 with few views, e.g. 'k3'."""
+    try:
+        return camera_model(calibration.camera_model).high_order_text()
+    except ValueError:
+        return 'k3'
+
+
 def calibration_texts(calibration, kept_views, final):
     """
     Return the Calibration box texts {name: text}.
@@ -131,7 +140,7 @@ def calibration_texts(calibration, kept_views, final):
         kept = '-' if kept_views is None else f'{kept_views} kept'
         texts['views'] = kept if calibration is None else (
             f'{kept}, calibrated from {calibration.views}'
-            + (' (k3 fixed)' if calibration.k3_fixed else ''))
+            + (f' ({fixed_text(calibration)} fixed)' if calibration.k3_fixed else ''))
     elif final.state in RESULT_STATES:
         shown = final.final
         used = f'{shown.views} of {final.total_views} used'
@@ -139,7 +148,7 @@ def calibration_texts(calibration, kept_views, final):
             [f'{len(final.suspects)} suspect'] if final.suspects else [])
         texts['views'] = (f'{used} ({", ".join(counts)})' if final.checked
                           else f'{used} (too few for the outlier check)') + (
-            ', k3 fixed' if shown.k3_fixed else '')
+            f', {fixed_text(shown)} fixed' if shown.k3_fixed else '')
     else:
         shown = None
         texts['views'] = f'{final.total_views} kept'
@@ -235,7 +244,7 @@ def current_calibration(calibration, final):
 
 def undistortion_key(calibration, alpha):
     """Return Undistortion.key() for a CalibrationState."""
-    return (tuple(float(v) for v in calibration.camera_matrix),
+    return (calibration.camera_model, tuple(float(v) for v in calibration.camera_matrix),
             tuple(float(v) for v in calibration.distortion),
             (int(calibration.image_width), int(calibration.image_height)), alpha)
 
@@ -573,6 +582,7 @@ class MainWindow(QMainWindow):
             undistortion = self._undistortion
             if undistortion is None or undistortion.key() != undistortion_key(calibration, alpha):
                 undistortion = Undistortion(
+                    camera_model(calibration.camera_model),
                     np.asarray(calibration.camera_matrix).reshape(3, 3),
                     calibration.distortion,
                     (calibration.image_width, calibration.image_height), alpha)

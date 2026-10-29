@@ -16,7 +16,7 @@ STATUS_COLORS = {
     'kept': QColor(80, 200, 255),
 }
 # Value column wide enough for these, so the box keeps its size.
-STATUS_VALUE_WIDTHS = ('not found', '00000 px/s', 'kept #000')
+STATUS_VALUE_WIDTHS = ('not found', '0.000 w/s', 'kept #000')
 
 # Uncertainty map colours: green up to MAP_GOOD_PX, red from MAP_BAD_PX (logarithmic).
 MAP_GOOD_PX = 0.25

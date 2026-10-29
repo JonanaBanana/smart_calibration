@@ -1,5 +1,7 @@
 """
-Calibration from the kept views (plumb_bob), its uncertainty, and the final pass.
+Calibration from the kept views, its uncertainty, and the final pass.
+
+The lens model is a camera_models.CameraModel.
 
 The covariance of the intrinsics comes from the Gauss-Newton normal equations, the point noise
 from the residuals. It is propagated to an uncertainty map over the image. It assumes independent
@@ -17,10 +19,8 @@ import time
 import cv2
 import numpy as np
 
-# Estimated parameters, in the order of cv2's camera matrix / distortion vector.
-INTRINSICS = ('fx', 'fy', 'cx', 'cy', 'k1', 'k2', 'p1', 'p2', 'k3')
-GROUPS = {'focal': (0, 1), 'centre': (2, 3), 'distortion': (4, 5, 6, 7, 8)}
-K3 = 8
+from smart_calibration.camera_models import PLUMB_BOB
+
 # Uncertainty map: this many cells across the image (rows follow the aspect ratio).
 MAP_COLS = 32
 # Hints: smallest tilt that counts, and the tolerance for a tilt axis along an image axis.
@@ -28,24 +28,23 @@ MIN_TILT_DEG = 15.0
 MIN_TILTED_VIEWS = 2
 AXIS_ALIGNED_DEG = 10.0
 
-_UNDISTORT_CRITERIA = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 100, 1e-12)
-
 
 @dataclass(frozen=True)
 class CalibrationResult:
     """One calibration and its uncertainty (scaled by uncertainty_scale)."""
 
+    camera_model: object          # camera_models.CameraModel
     image_size: tuple             # (width, height)
     views: int
     points: int
-    k3_fixed: bool
+    k3_fixed: bool                # k3 and higher held at 0 (camera_model.high_order)
     rms: float                    # reprojection error, px
     noise: float                  # point noise estimated from the residuals, px
     camera_matrix: np.ndarray     # (3, 3)
-    distortion: np.ndarray        # (5,) k1, k2, p1, p2, k3
-    std_deviations: np.ndarray    # (9,) per INTRINSICS, scaled; 0 for a fixed parameter
+    distortion: np.ndarray        # plumb_bob (5,) k1, k2, p1, p2, k3; fisheye (4,) k1-k4
+    std_deviations: np.ndarray    # per camera_model.parameters, scaled; 0 for a fixed parameter
     uncertainty_scale: float
-    uncertainty: dict             # 'total' and each GROUPS key: largest map value, px
+    uncertainty: dict             # 'total' and each group: largest map value, px
     uncertainty_map: np.ndarray   # (rows, cols) px, NaN where the model has no ray
     view_rms: np.ndarray          # (views,) reprojection error per view, px
     view_tilts: np.ndarray        # (views, 2) board_tilt() of each view, degrees
@@ -54,31 +53,23 @@ class CalibrationResult:
     leave_one_out: np.ndarray
     leave_one_out_residuals: tuple
     hints: tuple                  # strings: view types that are missing
-    distortion_folds: bool        # see distortion_folds_in_image()
+    distortion_folds: bool        # CameraModel.folds_in_image()
     duration_s: float
 
 
-def calibrate(object_points, image_points, image_size, fix_k3):
-    """Run cv2.calibrateCamera (pinhole); return (rms, camera matrix, distortion, rvecs, tvecs)."""
-    flags = cv2.CALIB_FIX_K3 if fix_k3 else 0
-    rms, camera_matrix, distortion, rvecs, tvecs = cv2.calibrateCamera(
-        object_points, image_points, image_size, None, None, flags=flags)
-    return rms, camera_matrix, distortion.ravel()[:5], rvecs, tvecs
-
-
-def view_terms(object_points, image_points, camera_matrix, distortion, rvecs, tvecs, used):
+def view_terms(model, object_points, image_points, camera_matrix, distortion, rvecs, tvecs,
+               used):
     """
     Return per view (r, A, B): residuals (2N,) and jacobians by the intrinsics and by the pose.
 
-    used: indices into INTRINSICS of the estimated parameters. r: detected minus projected.
+    used: indices into model.parameters of the estimated parameters. r: detected minus projected.
     """
-    columns = [6 + i for i in used]  # projectPoints' jacobian: rvec, tvec, fx, fy, cx, cy, dist
     terms = []
     for obj, img, rvec, tvec in zip(object_points, image_points, rvecs, tvecs):
-        projected, jacobian = cv2.projectPoints(
-            obj.astype(np.float64), rvec, tvec, camera_matrix, distortion)
-        residuals = (img.reshape(-1, 2) - projected.reshape(-1, 2)).ravel()
-        terms.append((residuals, jacobian[:, columns], jacobian[:, :6]))
+        projected, by_parameters, by_pose = model.project(obj, rvec, tvec, camera_matrix,
+                                                          distortion)
+        residuals = (img.reshape(-1, 2) - projected).ravel()
+        terms.append((residuals, by_parameters[:, used], by_pose))
     return terms
 
 
@@ -131,39 +122,37 @@ def map_grid(image_size, cols=MAP_COLS):
     return np.stack(np.meshgrid(xs, ys), -1)
 
 
-def projection_covariances(camera_matrix, distortion, covariance, used, pixels):
+def projection_covariances(model, camera_matrix, distortion, covariance, used, pixels):
     """
     Return the (N, 2, 2) covariance of where the model projects the ray through each pixel.
 
     NaN where the model has no ray for the pixel.
     """
-    pixels = np.asarray(pixels, np.float64).reshape(-1, 1, 2)
-    rays = cv2.undistortPointsIter(pixels, camera_matrix, distortion, None, None,
-                                   _UNDISTORT_CRITERIA).reshape(-1, 2)
-    points = np.column_stack([rays, np.ones(len(rays))]).reshape(-1, 1, 3)
-    back, jacobian = cv2.projectPoints(points, np.zeros(3), np.zeros(3), camera_matrix,
-                                       distortion)
-    j = jacobian[:, [6 + i for i in used]].reshape(-1, 2, len(used))
-    result = j @ covariance @ j.transpose(0, 2, 1)
-    result[np.linalg.norm(back.reshape(-1, 2) - pixels.reshape(-1, 2), axis=1) > 1e-3] = np.nan
+    rays = model.rays(camera_matrix, distortion, pixels)
+    result = np.full((len(rays), 2, 2), np.nan)
+    valid = np.isfinite(rays).all(axis=1)
+    if valid.any():
+        j = model.ray_jacobian(camera_matrix, distortion, rays[valid])[:, :, used]
+        result[valid] = j @ covariance @ j.transpose(0, 2, 1)
     return result
 
 
-def uncertainty_maps(camera_matrix, distortion, covariance, used, grid):
+def uncertainty_maps(model, camera_matrix, distortion, covariance, used, grid):
     """
-    Return {'total' and each GROUPS key: (rows, cols) map} of the RMS projection error, px.
+    Return {'total' and each model.groups key: (rows, cols) map} of the RMS projection error, px.
 
     A group's map takes the other parameters as exact.
     """
     covariances = {'total': covariance}
-    for group, members in GROUPS.items():
+    for group, members in model.groups.items():
         keep = [k for k, i in enumerate(used) if i in members]
         partial = np.zeros_like(covariance)
         partial[np.ix_(keep, keep)] = covariance[np.ix_(keep, keep)]
         covariances[group] = partial
     pixels = grid.reshape(-1, 2)
     return {name: np.sqrt(np.trace(projection_covariances(
-        camera_matrix, distortion, c, used, pixels), axis1=1, axis2=2)).reshape(grid.shape[:2])
+        model, camera_matrix, distortion, c, used, pixels), axis1=1, axis2=2)).reshape(
+            grid.shape[:2])
         for name, c in covariances.items()}
 
 
@@ -210,44 +199,13 @@ def pose_hints(tilts):
     return tuple(hints)
 
 
-def fold_radius(distortion):
-    """
-    Return the normalized radius where the radial distortion turns back (folds over), or inf.
-
-    Smallest r > 0 with d/dr [r (1 + k1 r^2 + k2 r^4 + k3 r^6)] = 0; tangential terms ignored.
-    """
-    k1, k2, k3 = (float(distortion[i]) if len(distortion) > i else 0.0 for i in (0, 1, 4))
-    roots = np.roots([7 * k3, 5 * k2, 3 * k1, 1.0])  # in r^2
-    positive = [root.real for root in roots if abs(root.imag) < 1e-12 and root.real > 0]
-    return float(np.sqrt(min(positive))) if positive else float('inf')
-
-
-def distortion_folds_in_image(camera_matrix, distortion, image_size):
-    """
-    Return whether the model folds over inside the image: some pixels have no valid ray.
-
-    Undistorting with such a model mirrors the image near its corners.
-    """
-    radius = fold_radius(distortion)
-    if not math.isfinite(radius):
-        return False
-    k1, k2, k3 = (float(distortion[i]) if len(distortion) > i else 0.0 for i in (0, 1, 4))
-    r2 = radius ** 2
-    reach = radius * (1 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3)
-    width, height = image_size
-    fx, fy, cx, cy = (camera_matrix[0][0], camera_matrix[1][1], camera_matrix[0][2],
-                      camera_matrix[1][2])
-    corners = max(math.hypot((x - cx) / fx, (y - cy) / fy)
-                  for x in (-0.5, width - 0.5) for y in (-0.5, height - 0.5))
-    return reach < corners
-
-
 FOLD_HINT = 'Add views in the image corners.'
 
 
 def uncertainty_hints(uncertainty):
     """Return a hint if the focal length or the principal point is the least certain group."""
-    groups = {g: uncertainty[g] for g in GROUPS if math.isfinite(uncertainty[g])}
+    groups = {g: value for g, value in uncertainty.items()
+              if g != 'total' and math.isfinite(value)}
     if not groups:
         return ()
     weakest = max(groups, key=groups.get)
@@ -259,32 +217,34 @@ def uncertainty_hints(uncertainty):
 
 
 def calibrate_views(object_points, image_points, image_size, free_k3_after_views,
-                    uncertainty_scale, with_leave_one_out=False):
+                    uncertainty_scale, with_leave_one_out=False, model=PLUMB_BOB):
     """
-    Calibrate and estimate the uncertainty; return a CalibrationResult.
+    Calibrate with a camera model and estimate the uncertainty; return a CalibrationResult.
 
-    k3 stays 0 below free_k3_after_views views. Raises cv2.error if OpenCV cannot calibrate.
+    k3 (and k4) stay 0 below free_k3_after_views views. Raises cv2.error if OpenCV cannot
+    calibrate.
     """
     start = time.perf_counter()
     image_size = tuple(image_size)
     fix_k3 = len(object_points) < free_k3_after_views
-    total_rms, camera_matrix, distortion, rvecs, tvecs = calibrate(
+    total_rms, camera_matrix, distortion, rvecs, tvecs = model.calibrate(
         object_points, image_points, image_size, fix_k3)
-    used = [i for i in range(len(INTRINSICS)) if not (fix_k3 and i == K3)]
-    terms = view_terms(object_points, image_points, camera_matrix, distortion, rvecs, tvecs,
-                       used)
+    used = [i for i in range(len(model.parameters)) if not (fix_k3 and i in model.high_order)]
+    terms = view_terms(model, object_points, image_points, camera_matrix, distortion, rvecs,
+                       tvecs, used)
     covariance, noise = intrinsic_covariance(terms, used)
     covariance = covariance * uncertainty_scale ** 2
     predicted = leave_one_out(terms) if with_leave_one_out else None
-    maps = uncertainty_maps(camera_matrix, distortion, covariance, used, map_grid(image_size))
+    maps = uncertainty_maps(model, camera_matrix, distortion, covariance, used,
+                            map_grid(image_size))
     uncertainty = {name: float(np.nanmax(m)) if np.isfinite(m).any() else math.nan
                    for name, m in maps.items()}
-    std = np.zeros(len(INTRINSICS))
+    std = np.zeros(len(model.parameters))
     std[used] = np.sqrt(np.diag(covariance))
     tilts = np.array([board_tilt(rvec) for rvec in rvecs])
-    folds = distortion_folds_in_image(camera_matrix, distortion, image_size)
+    folds = model.folds_in_image(camera_matrix, distortion, image_size)
     return CalibrationResult(
-        image_size=image_size, views=len(object_points),
+        camera_model=model, image_size=image_size, views=len(object_points),
         points=sum(len(points) for points in object_points), k3_fixed=fix_k3,
         rms=float(total_rms),
         noise=noise, camera_matrix=camera_matrix, distortion=distortion, std_deviations=std,
@@ -361,14 +321,14 @@ class FinalResult:
 
 def final_calibration(object_points, image_points, image_size, free_k3_after_views,
                       uncertainty_scale, z_limit, min_views, max_uncertainty_increase,
-                      max_removed_fraction, forced=(), progress=None):
+                      max_removed_fraction, forced=(), progress=None, model=PLUMB_BOB):
     """
     Calibrate, remove clear outliers one at a time, and return a FinalResult.
 
     With at least min_views views, the view with the highest leave-one-out z-score above z_limit
     is removed if that raises the mean uncertainty by at most max_uncertainty_increase, else
     kept as a suspect. At most max_removed_fraction of the views; never one in forced.
-    progress(text) is called before each calibration.
+    progress(text) is called before each calibration. model: the camera model.
     """
     forced = tuple(sorted(set(forced)))
     count = len(object_points)
@@ -376,7 +336,7 @@ def final_calibration(object_points, image_points, image_size, free_k3_after_vie
     def calibrate_subset(indices):
         return calibrate_views([object_points[i] for i in indices],
                                [image_points[i] for i in indices], image_size,
-                               free_k3_after_views, uncertainty_scale, True)
+                               free_k3_after_views, uncertainty_scale, True, model)
 
     if progress:
         progress(f'calibrating all {count} views')
@@ -414,20 +374,27 @@ def final_calibration(object_points, image_points, image_size, free_k3_after_vie
 def summary(result):
     """Return a multi-line summary of a FinalResult."""
     final = result.final
+    model = final.camera_model
     K, D = final.camera_matrix, final.distortion
     values = final.uncertainty_map[np.isfinite(final.uncertainty_map)]
     mean = float(values.mean()) if len(values) else math.nan
     removed = f', {len(result.removed)} removed' if result.removed else ''
+    distortion = dict(zip(model.parameters[4:], D))
+    radial = [name for name in distortion if name.startswith('k')]
+    tangential = [name for name in distortion if name.startswith('p')]
     lines = [
-        f'  image        {final.image_size[0]} x {final.image_size[1]}, plumb_bob',
-        f'  views        {final.views} used{removed}' + (', k3 fixed' if final.k3_fixed else ''),
+        f'  image        {final.image_size[0]} x {final.image_size[1]}, {model.name}',
+        f'  views        {final.views} used{removed}'
+        + (f', {model.high_order_text()} fixed' if final.k3_fixed else ''),
         f'  rms          {final.rms:.3f} px',
         f'  uncertainty  {mean:.2f} px mean, {final.uncertainty["total"]:.2f} px max',
         f'  fx fy        {K[0, 0]:10.3f} {K[1, 1]:10.3f}',
         f'  cx cy        {K[0, 2]:10.3f} {K[1, 2]:10.3f}',
-        f'  k1 k2 k3     {D[0]:10.6f} {D[1]:10.6f} {D[4]:10.6f}',
-        f'  p1 p2        {D[2]:10.6f} {D[3]:10.6f}',
     ]
+    for names in (radial, tangential):
+        if names:
+            lines.append(f'  {" ".join(names):<13}'
+                         + ' '.join(f'{distortion[name]:10.6f}' for name in names))
     if final.distortion_folds:
         lines.append('  WARNING      the distortion model is not valid near the image corners')
     return '\n'.join(lines)

@@ -1,0 +1,53 @@
+# calibration_node settings for the ircam_wide camera. Select a file with params_file:=<path>.
+# Parameters marked (startup) need a restart; all others can be changed while running, from the
+# GUI or with `ros2 param set /calibration_node <name> <value>`.
+calibration_node:
+  ros__parameters:
+    # Board (startup)
+    board_mode: chessboard      # chessboard, or oversized_marker (radon board with markers)
+    board_cols: 6               # inner corners (squares - 1), chessboard mode only
+    board_rows: 7
+    square_size: 0.1            # side of one square, metres
+
+    # Camera model (startup)
+    camera_model: plumb_bob     # plumb_bob, or fisheye (Kannala-Brandt) for wide-angle lenses
+
+    # Preprocessing
+    stretch_low_percentile: 0.5     # intensity percentile mapped to black
+    stretch_high_percentile: 99.5   # intensity percentile mapped to white
+    gamma: 1.0                      # > 1 brightens dark regions, < 1 darkens bright ones
+    contrast_strength: 0.0          # steepness of the S-shaped contrast curve, 0: off
+    contrast_midpoint: 0.5          # grey level (0-1) the curve keeps: below darker, above lighter
+
+    # Detector (findChessboardCornersSB flags)
+    detector_normalize: false   # histogram equalization first
+    detector_exhaustive: false   # longer search: finds the board more often, slower
+    detector_accuracy: false    # more accurate corners, ~4x slower
+
+    # View selection: a detection is kept if it passes all three checks
+    max_board_speed_rel: 0.3    # image widths per second, mean corner movement
+    max_corner_residual: 0.1    # squares, largest corner distance from where its neighbours put it
+    min_view_distance: 0.15      # board sizes, smallest outline difference to every kept view
+    border_margin_px: 10.0      # corners closer to the image border are not used
+
+    # Background calibration
+    min_calibration_views: 15    # first calibration at this many views
+    calibrate_every_views: 10    # then after every this many new views
+    free_k3_after_views: 35     # k3 (fisheye: k3, k4) stays 0 below this many views
+    uncertainty_scale: 2.0      # factor on the estimated uncertainty, which comes out too small
+
+    # Final calibration (Finish): remove views the other views predict badly
+    outlier_z_limit: 6.0                    # robust z-score that flags a view
+    outlier_min_views: 15                   # no outlier check with fewer views
+    outlier_max_uncertainty_increase: 1.5   # keep a flagged view if removing it raises the
+                                            # mean uncertainty by more than this factor
+    outlier_max_fraction: 0.1               # remove at most this fraction of the views
+
+    # Accept saves the calibration here (on the node's machine; strftime placeholders and ~ work)
+    output_file: ~/calibs/opencv_plumb_bob_chessboard_%Y-%m-%d_%H-%M-%S.yaml
+
+    # Camera and GUI (startup)
+    image_qos: auto             # auto (match the camera), reliable or best_effort
+    preview_max_width: 1280     # preview images to the GUI are downscaled to this width
+    preview_jpeg_quality: 80
+

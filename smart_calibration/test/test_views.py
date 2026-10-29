@@ -9,7 +9,7 @@ from smart_calibration.views import (
 
 from test_detection import render_board
 
-MAX_SPEED = 100.0
+MAX_SPEED = 0.15  # image widths per second
 MAX_RESIDUAL = 0.1
 MIN_DISTANCE = 0.1
 # A flat 9 x 6 grid of corners with 30 px squares, (rows, cols, 2).
@@ -78,7 +78,7 @@ def test_all_checks_are_evaluated_even_if_one_fails():
     bad = GRID + 50.0
     bad[2, 4] += [0.0, 6.0]  # misplaced corner
     consider(views, chessboard(bad), (640, 480), 2.0)
-    moving = consider(views, chessboard(bad + 30.0), (640, 480), 2.1)  # 424 px/s
+    moving = consider(views, chessboard(bad + 30.0), (640, 480), 2.1)  # 424 px/s = 0.66 w/s
     assert moving.speed_ok is False and moving.residual_ok is False
     assert moving.distance is not None and moving.distance_ok and moving.view is None
 
@@ -141,11 +141,11 @@ def test_first_detection_is_not_kept_because_its_speed_is_unknown():
 def test_only_slow_boards_are_kept():
     views = collection()
     consider(views, chessboard(GRID), (640, 480), 1.0, min_distance=0.0)
-    # 5 px in 0.1 s = 50 px/s: kept; then 20 px in 0.1 s = 200 px/s: not kept.
+    # 5 px in 0.1 s on a 640 px wide image = 0.078 w/s: kept; then 20 px = 0.31 w/s: not kept.
     slow = consider(views, chessboard(GRID + [3.0, 4.0]), (640, 480), 1.1, min_distance=0.0)
-    assert slow.view is not None and abs(slow.view.speed - 50.0) < 1e-3
+    assert slow.view is not None and abs(slow.view.speed - 50.0 / 640) < 1e-6
     fast = consider(views, chessboard(GRID + [15.0, 20.0]), (640, 480), 1.2, min_distance=0.0)
-    assert fast.view is None and not fast.speed_ok and abs(fast.speed - 200.0) < 1e-3
+    assert fast.view is None and not fast.speed_ok and abs(fast.speed - 200.0 / 640) < 1e-6
     assert len(views) == 1
 
 

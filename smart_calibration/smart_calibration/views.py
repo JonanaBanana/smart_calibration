@@ -180,7 +180,7 @@ class View:
     image_size: tuple       # (width, height) of the image the corners were detected in
     image_points: np.ndarray
     object_points: np.ndarray
-    speed: float            # board speed since the previous detection, pixels per second
+    speed: float            # board speed since the previous detection, image widths per second
     outline: np.ndarray     # (4, 2) image positions of the reference outline, see board_outline()
 
 
@@ -192,7 +192,7 @@ class Assessment:
     None where a value cannot be measured. view: the kept View, or None.
     """
 
-    speed: float            # board speed, pixels per second (board_speed)
+    speed: float            # board speed, image widths per second
     speed_ok: bool
     residual: float         # largest corner_residuals() value, squares
     residual_ok: bool
@@ -225,7 +225,8 @@ class ViewCollection:
         Check a detection and keep it as a view if it passes; return an Assessment.
 
         Pass every detection: consecutive ones give the board speed. Kept if the board moved at
-        most max_speed px/s, no corner residual exceeds max_residual and the outline is at least
+        most max_speed image widths per second, no corner residual exceeds max_residual and the
+        outline is at least
         min_distance board sizes from every kept view. keep=False: check only.
         """
         image_size = tuple(image_size)
@@ -235,6 +236,8 @@ class ViewCollection:
         if previous is not None:
             previous_stamp, previous_board = previous
             speed = board_speed(board, stamp, previous_board, previous_stamp)
+            if speed is not None:
+                speed /= image_size[0]
         speed_ok = None if speed is None else speed <= max_speed
         residuals = corner_residuals(board)
         residual, residual_ok = None, None

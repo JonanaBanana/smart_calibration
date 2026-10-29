@@ -14,7 +14,7 @@ def generate_launch_description():
                         'parameters).'),
         DeclareLaunchArgument(
             'image_topic',
-            default_value='/ircam_wide/decoded',
+            default_value='/camera/image_raw',
             description='Raw camera topic, used only while the raw camera view is on.'),
         Node(
             package='smart_calibration',

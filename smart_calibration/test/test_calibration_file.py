@@ -27,6 +27,15 @@ def test_calibration_file_is_opencv_yaml_and_reads_back(tmp_path):
     assert read['calibration_time'] == '2026-10-26 14:03:12'
 
 
+def test_fisheye_calibration_file(tmp_path):
+    path = tmp_path / 'fisheye.yaml'
+    distortion = np.array([0.05, -0.01, 0.002, -0.0003])
+    write_calibration(path, np.eye(3), distortion, 0.2, (1280, 720), 'fisheye', WHEN)
+    read = read_calibration(path)
+    assert read['D'].shape == (4, 1) and read['distortion_model'] == 'fisheye'
+    np.testing.assert_array_equal(read['D'].ravel(), distortion)
+
+
 def test_output_path_fills_in_the_time_and_home_folder():
     path = output_path('~/calibration/cam_%Y-%m-%d_%H-%M-%S.yaml', WHEN)
     assert path == Path(os.path.expanduser('~'), 'calibration/cam_2026-10-26_14-03-12.yaml')

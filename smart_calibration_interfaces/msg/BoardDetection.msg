@@ -38,8 +38,8 @@ uint8 CHECK_NOT_EVALUATED = 0  # no board, or the value cannot be measured (valu
 uint8 CHECK_PASSED = 1
 uint8 CHECK_FAILED = 2
 
-# Motion: board speed since the previous detection in pixels per second (mean corner movement),
-# against max_board_speed. Not evaluated for the first detection and after a gap.
+# Motion: board speed since the previous detection in image widths per second (mean corner
+# movement), against max_board_speed_rel. Not evaluated for the first detection and after a gap.
 uint8 speed_check
 float32 board_speed
 

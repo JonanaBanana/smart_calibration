@@ -20,6 +20,7 @@ from std_srvs.srv import Trigger
 
 from smart_calibration.calibration import calibrate_views, final_calibration, summary
 from smart_calibration.calibration_file import output_path, write_calibration
+from smart_calibration.camera_models import camera_model, CAMERA_MODELS
 from smart_calibration.detection import BOARD_MODES, detect_board, sb_flags
 from smart_calibration.environment import check_environment
 from smart_calibration.preprocessing import (
@@ -34,7 +35,7 @@ from smart_calibration_interfaces.srv import Finish, GetView
 LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
                    'contrast_strength', 'contrast_midpoint',
                    'detector_normalize', 'detector_exhaustive', 'detector_accuracy',
-                   'max_board_speed', 'max_corner_residual', 'border_margin_px',
+                   'max_board_speed_rel', 'max_corner_residual', 'border_margin_px',
                    'min_view_distance', 'calibrate_every_views', 'min_calibration_views',
                    'free_k3_after_views', 'uncertainty_scale', 'outlier_z_limit',
                    'outlier_min_views', 'outlier_max_uncertainty_increase',
@@ -79,6 +80,7 @@ def calibration_message(result, header):
     state.image_width, state.image_height = result.image_size
     state.views, state.points = result.views, result.points
     state.duration_ms = result.duration_s * 1000.0
+    state.camera_model = result.camera_model.name
     state.k3_fixed = result.k3_fixed
     state.rms, state.noise = result.rms, result.noise
     state.camera_matrix = result.camera_matrix.ravel().tolist()
@@ -175,6 +177,10 @@ class CalibrationNode(Node):
         self.board_rows = self.declare_parameter('board_rows', 6, corner_count).value
         self.square_size = self.declare_parameter('square_size', 0.025, float_range(
             0.001, 1.0, 'Side length of one square in metres.')).value
+        self.camera_model = camera_model(self.declare_parameter(
+            'camera_model', 'plumb_bob', ParameterDescriptor(
+                description='Lens model: ' + ' or '.join(CAMERA_MODELS)
+                            + ' (Kannala-Brandt, for wide-angle and fisheye lenses).')).value)
         # findChessboardCornersSB flags.
         self.declare_parameter('detector_normalize', False, ParameterDescriptor(
             description='Histogram equalization before detection.'))
@@ -195,8 +201,8 @@ class CalibrationNode(Node):
         self.declare_parameter('contrast_midpoint', 0.5, float_range(
             0.0, 1.0, 'Grey level (0-1) the contrast curve keeps.'))
         # View selection.
-        self.declare_parameter('max_board_speed', 100.0, float_range(
-            1.0, 10000.0, 'Largest board speed of a kept view, pixels per second.'))
+        self.declare_parameter('max_board_speed_rel', 0.1, float_range(
+            0.001, 10.0, 'Largest board speed of a kept view, image widths per second.'))
         self.declare_parameter('max_corner_residual', 0.1, float_range(
             0.0, 10.0, 'Largest corner distance from where its neighbours put it, in '
                        'squares.'))
@@ -212,7 +218,7 @@ class CalibrationNode(Node):
             description='First calibration at this many views.',
             integer_range=[IntegerRange(from_value=3, to_value=1000, step=1)]))
         self.declare_parameter('free_k3_after_views', 20, ParameterDescriptor(
-            description='k3 stays 0 below this many views.',
+            description='k3 (fisheye: k3 and k4) stays 0 below this many views.',
             integer_range=[IntegerRange(from_value=0, to_value=10000, step=1)]))
         self.declare_parameter('uncertainty_scale', 2.0, float_range(
             0.1, 100.0, 'Factor on the estimated uncertainties.'))
@@ -302,7 +308,8 @@ class CalibrationNode(Node):
             board = 'an oversized radon checkerboard with markers'
         self.get_logger().info(
             f'waiting for images on {image_topic} ({qos.reliability.name.lower()}), looking for '
-            f'{board} ({self.square_size * 1000:g} mm squares), publishing detections on '
+            f'{board} ({self.square_size * 1000:g} mm squares), calibrating with the '
+            f'{self.camera_model.name} model, publishing detections on '
             f'{self.detection_pub.topic_name}')
 
     def on_set_parameters(self, parameters):
@@ -395,7 +402,7 @@ class CalibrationNode(Node):
                 stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
                 # After Finish, frames are still checked but not kept.
                 assessment = self.views.consider(
-                    board, size, stamp, live['max_board_speed'], live['max_corner_residual'],
+                    board, size, stamp, live['max_board_speed_rel'], live['max_corner_residual'],
                     live['min_view_distance'],
                     keep=self._state == FinalCalibration.STATE_COLLECTING)
                 if assessment.view is not None:
@@ -414,7 +421,8 @@ class CalibrationNode(Node):
         checks = ''
         if assessment is not None:
             dropped = int((~board.valid).sum())
-            checks = (f', moving {format_value(assessment.speed, ".0f")} px/s, corner residual '
+            checks = (f', moving {format_value(assessment.speed, ".3f")} image widths/s, corner '
+                      'residual '
                       f'{format_value(assessment.residual, ".3f")}'
                       + (f' ({dropped} corners at the border not used)' if dropped else '')
                       + f', {format_value(assessment.distance, ".3f")} from the nearest view'
@@ -462,7 +470,8 @@ class CalibrationNode(Node):
 
     def run_background(self, objects, images, size, header, free_k3_after_views, scale):
         try:
-            result = calibrate_views(objects, images, size, free_k3_after_views, scale)
+            result = calibrate_views(objects, images, size, free_k3_after_views, scale,
+                                     model=self.camera_model)
         except (cv2.error, np.linalg.LinAlgError) as error:
             self.get_logger().warn(f'calibration from {len(objects)} views failed: {error}')
             return
@@ -492,7 +501,7 @@ class CalibrationNode(Node):
                 objects, images, size, live['free_k3_after_views'], live['uncertainty_scale'],
                 live['outlier_z_limit'], live['outlier_min_views'],
                 live['outlier_max_uncertainty_increase'], live['outlier_max_fraction'], keep,
-                progress)
+                progress, self.camera_model)
         except Cancelled:
             return
         except (cv2.error, np.linalg.LinAlgError) as error:
@@ -590,7 +599,7 @@ class CalibrationNode(Node):
             path = output_path(self.live['output_file'], now)
             try:
                 write_calibration(path, final.camera_matrix, final.distortion, final.rms,
-                                  final.image_size, 'plumb_bob', now)
+                                  final.image_size, final.camera_model.name, now)
             except OSError as error:
                 response.message = f'not accepted: cannot save the calibration: {error}'
                 self.get_logger().error(response.message)

@@ -20,14 +20,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'image_topic',
-            default_value='/ircam_wide/decoded',
+            default_value='/camera/image_raw',
             description='Image topic of the camera to calibrate.'),
         DeclareLaunchArgument(
             'params_file',
             default_value=PathJoinSubstitution(
-                [FindPackageShare('smart_calibration'), 'config', 'ircam_wide.yaml']),
+                [FindPackageShare('smart_calibration'), 'config', 'example_config.yaml']),
             description='calibration_node parameters: board size, preprocessing, detector '
-                        'flags (see config/ircam_wide.yaml).'),
+                        'flags (see config/example_config.yaml).'),
         DeclareLaunchArgument(
             'log_level',
             default_value='info',

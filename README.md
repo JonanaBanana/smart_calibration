@@ -18,7 +18,34 @@ final pass removes outlier views, and the result is saved as an OpenCV YAML file
 - **Tunable preprocessing** for low-contrast cameras (e.g. thermal): contrast stretch, gamma and
   an S-curve, with a live histogram
 
-Camera model: pinhole with `plumb_bob` distortion (k1, k2, p1, p2, k3); fisheye is planned.
+Camera models, chosen with `camera_model`:
+
+- **`plumb_bob`** (default): pinhole with radial and tangential distortion (k1, k2, p1, p2, k3),
+  `cv2.calibrateCamera`. For normal and moderately wide lenses, up to about 100° diagonal field
+  of view.
+- **`fisheye`**: Kannala-Brandt (k1-k4), the distorted radius a polynomial in the ray angle.
+  For wide-angle and fisheye lenses, also beyond 180°. It is OpenCV's `cv2.fisheye` model (called
+  `equidistant` in ROS camera_info), but calibrated by the package's own Levenberg-Marquardt
+  ([fisheye_calibration.py](smart_calibration/smart_calibration/fisheye_calibration.py)):
+  `cv2.fisheye.calibrate` mostly fails on lenses wider than 180° (opencv/opencv#23962, #30246).
+  The calibrator assumes:
+  - a planar grid board, with views as the detector delivers them (at least 5 × 5 corners), which
+    the view checks ensure;
+  - a roughly centred lens: the principal point starts at the image centre;
+  - a diagonal field of view of 40° to 260°, the range its starting focal length scan covers;
+  - a lens not far from equidistant (image radius f·θ), its starting point. Most fisheye lenses
+    are close to that.
+
+  Tested on synthetic lenses ([utility/fisheye_benchmark.py](utility/fisheye_benchmark.py), 5 to
+  89 views): reliable for near-equidistant lenses from 140° to 260°, equisolid (180°),
+  stereographic (190°) and an ordinary 60° lens. Lenses far from equidistant and wide, such as
+  orthographic (160°) or an ordinary 100° lens, sometimes end in a wrong solution with an rms of
+  several px; use `plumb_bob` for ordinary lenses. A calibration that does not converge fails
+  with an error instead of returning a result.
+
+A wide lens calibrated with `plumb_bob` usually shows itself by the model folding over near the
+image corners (the amber hint and warning), because a polynomial in tan θ cannot follow it out to
+the corners: try `fisheye`.
 
 ## Installation
 
@@ -94,7 +121,9 @@ ros2 launch smart_calibration gui.launch.py
 
 Check **undistorted** in the View box to see the stream undistorted by the current calibration.
 A dashed amber line marks where the distortion model is not valid yet; views near the image
-corners move it out.
+corners move it out. The undistorted view is a pinhole view, which cannot show rays at 90° or more
+off the axis: with a fisheye wider than 180°, part of the image is never shown, and the view
+zooms out at most 5×.
 
 ### Output
 
@@ -105,12 +134,12 @@ An OpenCV YAML file, readable with `cv2.FileStorage`:
 ---
 M: !!opencv-matrix        # camera matrix, 3 x 3
    ...
-D: !!opencv-matrix        # k1, k2, p1, p2, k3 (5 x 1)
+D: !!opencv-matrix        # plumb_bob: k1, k2, p1, p2, k3 (5 x 1); fisheye: k1-k4 (4 x 1)
    ...
 reprojection_error: 0.11
 width: 1280
 height: 720
-distortion_model: plumb_bob
+distortion_model: plumb_bob   # or fisheye: use cv2.fisheye's functions with it
 calibration_time: "2026-10-26 15:02:11"
 ```
 
@@ -143,16 +172,17 @@ file.
 | Parameter | Meaning |
 |---|---|
 | `board_mode`, `board_cols`, `board_rows`, `square_size` | board, see [Boards](#boards); `square_size` in metres (startup) |
+| `camera_model` | `plumb_bob` or `fisheye`, see above (startup) |
 | `stretch_low_percentile`, `stretch_high_percentile` | intensity percentiles mapped to black and white |
 | `gamma` | after the stretch; > 1 brightens dark regions |
 | `contrast_strength`, `contrast_midpoint` | S-curve after gamma: grey levels below the midpoint get darker, above it lighter; strength 0 is off. Put the midpoint between the dark and light squares' peaks in the GUI histogram |
 | `detector_normalize`, `detector_exhaustive`, `detector_accuracy` | detector flags: histogram equalization; longer search (finds more boards, slower); more accurate corners (~4× slower) |
-| `max_board_speed` | largest board speed of a kept view, px/s |
+| `max_board_speed_rel` | largest board speed of a kept view, in image widths per second (mean corner movement; the status box shows it as `w/s`) |
 | `max_corner_residual` | largest distance of a corner from where its neighbours put it, in squares; one bad corner rejects the frame |
 | `min_view_distance` | smallest difference of the board outline to every kept view, in board sizes |
 | `border_margin_px` | corners closer to the image border are not used |
 | `min_calibration_views`, `calibrate_every_views` | first background calibration at this many views, then after every this many new views |
-| `free_k3_after_views` | k3 stays 0 below this many views |
+| `free_k3_after_views` | k3 (fisheye: k3 and k4) stays 0 below this many views |
 | `uncertainty_scale` | factor on the estimated uncertainty, which assumes independent corner errors and comes out too small |
 | `outlier_z_limit` | final pass: robust z-score of a view's leave-one-out error that flags it |
 | `outlier_min_views` | final pass: no outlier check with fewer views |
@@ -181,8 +211,13 @@ All names are relative to the node (`/calibration_node/...`). The types are in
 ## Development
 
 ```bash
-# tests (system Python, with ROS sourced), from smart_calibration/
-python3 -m pytest test/
+# tests, with ROS and the workspace sourced, from smart_calibration/
+# 1. venv active: against the venv's OpenCV, the one the nodes use. ROS's launch_testing pytest
+#    plugins need PyYAML, which the isolated venv lacks; the tests don't use them.
+python -m pytest test/ -p no:launch_testing -p no:launch_ros \
+    --ignore=test/test_flake8.py --ignore=test/test_pep257.py
+# 2. venv deactivated: the linters, which need the system's flake8 and pydocstyle
+python3 -m pytest test/test_flake8.py test/test_pep257.py test/test_copyright.py
 
 # synthetic test images with exact ground truth, and an evaluation of detection and calibration
 # (venv active, from the repository root)
@@ -191,7 +226,9 @@ python utility/evaluate_dataset.py dataset/synthetic --exhaustive --visualize da
 ```
 
 `utility/uncertainty_prototype.py` and `utility/outlier_prototype.py` are the experiments behind
-the uncertainty scale and the outlier rules.
+the uncertainty scale and the outlier rules. `utility/fisheye_benchmark.py` compares the fisheye
+calibrator with `cv2.fisheye.calibrate` on synthetic lenses from 140° to 260° (`--few-views` for
+the background calibrations' 5 to 30 views).
 
 ```
 smart_calibration/                 repository root

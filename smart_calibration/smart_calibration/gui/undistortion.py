@@ -1,18 +1,16 @@
 """
-Undistortion of images of any size and of points in full image pixels (plumb_bob).
+Undistortion of images of any size and of points in full image pixels.
 
-alpha 0 shows only valid pixels, alpha 1 the whole image (cv2.getOptimalNewCameraMatrix). Beyond
-the radius where the distortion model folds over (calibration.fold_radius) the view is black.
+The undistorted view is a pinhole view. alpha 0 shows only valid pixels, alpha 1 the whole image
+(see CameraModel.new_camera_matrix). Beyond the radius where the model folds over the view is
+black.
 """
 
 import cv2
 import numpy as np
 
-from smart_calibration.calibration import fold_radius
-
-# Larger zoom factors from getOptimalNewCameraMatrix are treated as failures.
+# Zoom of the undistorted view, limited to [1 / MAX_ZOOM, MAX_ZOOM].
 MAX_ZOOM = 5.0
-_UNDISTORT_CRITERIA = (cv2.TERM_CRITERIA_COUNT | cv2.TERM_CRITERIA_EPS, 50, 1e-9)
 
 
 def scaled_matrix(camera_matrix, full_size, size):
@@ -30,18 +28,25 @@ def scaled_matrix(camera_matrix, full_size, size):
 class Undistortion:
     """Undistorts images and points with one calibration; remap tables cached per image size."""
 
-    def __init__(self, camera_matrix, distortion, image_size, alpha):
-        """image_size: (width, height) the calibration is for; alpha: see the module docstring."""
+    def __init__(self, model, camera_matrix, distortion, image_size, alpha):
+        """
+        model: camera_models.CameraModel; image_size: (width, height) the calibration is for.
+
+        alpha: see the module docstring.
+        """
+        self.model = model
         self.camera_matrix = np.asarray(camera_matrix, np.float64).reshape(3, 3)
         self.distortion = np.asarray(distortion, np.float64).ravel()
         self.image_size = tuple(int(v) for v in image_size)
         self.alpha = alpha
-        new, _ = cv2.getOptimalNewCameraMatrix(self.camera_matrix, self.distortion,
-                                               self.image_size, alpha, self.image_size)
+        new = np.array(model.new_camera_matrix(self.camera_matrix, self.distortion,
+                                               self.image_size, alpha), np.float64)
         zoom = new[0, 0] / self.camera_matrix[0, 0]
-        if not (np.isfinite(new).all() and 1 / MAX_ZOOM < zoom < MAX_ZOOM):
+        if not (np.isfinite(new).all() and zoom > 0):
             new = self.camera_matrix.copy()
-        self.fold_radius = fold_radius(self.distortion)
+        elif not 1 / MAX_ZOOM <= zoom <= MAX_ZOOM:
+            new[:2, :2] *= np.clip(zoom, 1 / MAX_ZOOM, MAX_ZOOM) / zoom
+        self.fold_radius = model.fold_radius(self.distortion)
         if np.isfinite(self.fold_radius):
             # Zoom out no further than the fold circle filling the view's height.
             least = min(self.image_size) / 2 / self.fold_radius
@@ -53,8 +58,8 @@ class Undistortion:
 
     def key(self):
         """Return what this undistortion depends on, to tell whether it must be rebuilt."""
-        return (tuple(self.camera_matrix.ravel()), tuple(self.distortion), self.image_size,
-                self.alpha)
+        return (self.model.name, tuple(self.camera_matrix.ravel()), tuple(self.distortion),
+                self.image_size, self.alpha)
 
     def image(self, image):
         """Return the undistorted picture: same size and type, black (NaN) outside the view."""
@@ -63,9 +68,9 @@ class Undistortion:
         if maps is None:
             size = (width, height)
             new = scaled_matrix(self.new_camera_matrix, self.image_size, size)
-            maps = cv2.initUndistortRectifyMap(
-                scaled_matrix(self.camera_matrix, self.image_size, size), self.distortion,
-                None, new, size, cv2.CV_32FC1)
+            maps = self.model.undistort_maps(
+                scaled_matrix(self.camera_matrix, self.image_size, size), self.distortion, new,
+                size)
             if np.isfinite(self.fold_radius):
                 xs = (np.arange(width) - new[0, 2]) / new[0, 0]
                 ys = (np.arange(height) - new[1, 2]) / new[1, 1]
@@ -95,9 +100,8 @@ class Undistortion:
         flat, out = points.reshape(-1, 2), result.reshape(-1, 2)
         finite = np.isfinite(flat).all(axis=1)
         if finite.any():
-            out[finite] = cv2.undistortPointsIter(
-                flat[finite].reshape(-1, 1, 2), self.camera_matrix, self.distortion, None,
-                self.new_camera_matrix, _UNDISTORT_CRITERIA).reshape(-1, 2)
+            out[finite] = self.model.undistort_points(
+                self.camera_matrix, self.distortion, flat[finite], self.new_camera_matrix)
         return result.astype(np.float32)
 
     def directions(self, points, vectors):
