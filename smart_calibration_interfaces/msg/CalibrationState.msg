@@ -16,7 +16,7 @@ float32 duration_ms
 # Lens model (camera_model parameter): plumb_bob, or fisheye (Kannala-Brandt, cv2.fisheye).
 string camera_model
 
-# k3 (fisheye: k3 and k4) is held at 0 while there are fewer than free_k3_after_views views.
+# k3 (fisheye: k3 and k4) is held at 0 (fix_higher_order parameter).
 bool k3_fixed
 
 # Reprojection error (RMS over all corners) and the point noise estimated from it, px.

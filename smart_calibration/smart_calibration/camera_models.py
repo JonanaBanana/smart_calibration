@@ -52,7 +52,7 @@ class CameraModel:
     name = ''
     # Estimated parameters: fx, fy, cx, cy, then the distortion vector in OpenCV's order.
     parameters = ()
-    # Indices into parameters held at 0 with few views (free_k3_after_views): k3 and higher.
+    # Indices into parameters held at 0 with fix_higher_order: k3 and higher.
     high_order = ()
 
     @property

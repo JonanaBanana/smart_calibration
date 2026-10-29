@@ -62,7 +62,7 @@ FISHEYE_VARIED = [(30, a, x, y, d) for a, (x, y, d) in zip(
 
 def test_calibration_recovers_the_camera_and_reports_its_uncertainty():
     objects, images = views(VARIED)
-    result = calibrate_views(objects, images, SIZE, free_k3_after_views=20)
+    result = calibrate_views(objects, images, SIZE, fix_higher_order=True)
     assert result.views == 15 and result.points == 15 * 54 and result.k3_fixed
     assert np.abs(result.camera_matrix - CAMERA_MATRIX).max() < 2.0
     assert result.rms < 0.1 and abs(result.noise - 0.05) < 0.01
@@ -81,7 +81,7 @@ def test_calibration_recovers_the_camera_and_reports_its_uncertainty():
 
 def test_uncertainty_is_the_jackknife_but_at_least_the_independent_noise_one():
     objects, images = views(VARIED)
-    result = calibrate_views(objects, images, SIZE, free_k3_after_views=0)
+    result = calibrate_views(objects, images, SIZE, fix_higher_order=False)
     assert not result.k3_fixed
     _, K, D, rvecs, tvecs = PLUMB_BOB.calibrate(objects, images, SIZE, False)
     used = list(range(9))
@@ -103,8 +103,8 @@ def test_boards_facing_the_camera_leave_the_focal_length_uncertain():
         (0, -0.2, -0.1, 0.45), (90, 0.2, 0.1, 0.45), (45, -0.2, 0.1, 0.45),
         (135, 0.2, -0.1, 0.45), (0, 0.0, 0.0, 0.35), (90, 0.0, 0.0, 0.6))]
     tilted = VARIED[:6]
-    flat_result = calibrate_views(*views(flat), SIZE, 20)
-    tilted_result = calibrate_views(*views(tilted), SIZE, 20)
+    flat_result = calibrate_views(*views(flat), SIZE, True)
+    tilted_result = calibrate_views(*views(tilted), SIZE, True)
     assert flat_result.uncertainty['focal'] > 3 * tilted_result.uncertainty['focal']
     assert flat_result.hints and 'Tilt the board more' in flat_result.hints[0]
 
@@ -146,9 +146,9 @@ def bent(image_points, amount):
 
 def test_leave_one_out_errors_match_recalibrating_without_the_view():
     objects, images = views(VARIED[:10])
-    result = calibrate_views(objects, images, SIZE, 20, with_leave_one_out=True)
+    result = calibrate_views(objects, images, SIZE, True, with_leave_one_out=True)
     assert result.leave_one_out.shape == (10,)
-    assert calibrate_views(objects, images, SIZE, 20).leave_one_out is None
+    assert calibrate_views(objects, images, SIZE, True).leave_one_out is None
     for i in (0, 4):
         rest = [k for k in range(10) if k != i]
         _, K, D, _, _ = PLUMB_BOB.calibrate([objects[k] for k in rest],
@@ -160,7 +160,7 @@ def test_leave_one_out_errors_match_recalibrating_without_the_view():
 
 
 def final(objects, images, **overrides):
-    settings = dict(free_k3_after_views=20, z_limit=6, min_views=10,
+    settings = dict(fix_higher_order=True, z_limit=6, min_views=10,
                     max_uncertainty_increase=1.5, max_removed_fraction=0.1)
     settings.update(overrides)
     return final_calibration(objects, images, SIZE, **settings)
@@ -218,7 +218,7 @@ def test_distortion_folding_inside_the_image():
     # Turns back, but only beyond the image corners (a narrow image).
     narrow = [[640.0, 0.0, 199.5], [0.0, 640.0, 149.5], [0.0, 0.0, 1.0]]
     assert not PLUMB_BOB.folds_in_image(narrow, [-0.3, 0, 0, 0, 0], (400, 300))
-    result = calibrate_views(*views(VARIED), SIZE, 20)
+    result = calibrate_views(*views(VARIED), SIZE, True)
     assert not result.distortion_folds and FOLD_HINT not in result.hints
 
 
@@ -234,7 +234,7 @@ def test_summary_lists_the_result():
 
 def test_fisheye_calibration_recovers_the_camera():
     objects, images = views(FISHEYE_VARIED, model=FISHEYE)
-    result = calibrate_views(objects, images, SIZE, 0, model=FISHEYE)
+    result = calibrate_views(objects, images, SIZE, False, model=FISHEYE)
     assert result.camera_model is FISHEYE and not result.k3_fixed
     assert np.abs(result.camera_matrix - FISHEYE_MATRIX).max() < 1.0
     # The lens is recovered where the views reach, up to 70 degrees off the axis.
@@ -247,13 +247,14 @@ def test_fisheye_calibration_recovers_the_camera():
     # The model reaches the image corners, 105 degrees off the axis: a map value everywhere.
     assert np.isfinite(result.uncertainty_map).all() and not result.distortion_folds
     assert result.hints == ()
-    few = calibrate_views(objects, images, SIZE, 20, model=FISHEYE)
-    assert few.k3_fixed and np.all(few.std_deviations[6:] == 0) and np.all(few.distortion[2:] == 0)
+    fixed = calibrate_views(objects, images, SIZE, True, model=FISHEYE)
+    assert fixed.k3_fixed and np.all(fixed.std_deviations[6:] == 0)
+    assert np.all(fixed.distortion[2:] == 0)
 
 
 def test_fisheye_leave_one_out_errors_match_recalibrating_without_the_view():
     objects, images = views(FISHEYE_VARIED[:12], model=FISHEYE)
-    result = calibrate_views(objects, images, SIZE, 0, with_leave_one_out=True, model=FISHEYE)
+    result = calibrate_views(objects, images, SIZE, False, with_leave_one_out=True, model=FISHEYE)
     for i in (0, 7):
         rest = [k for k in range(12) if k != i]
         _, K, D, _, _ = FISHEYE.calibrate([objects[k] for k in rest],

@@ -212,7 +212,7 @@ Except for the startup ones, the parameters can be changed while running, from t
 | `min_view_distance` | smallest difference of the board outline to every kept view, in board sizes |
 | `border_margin_px` | corners closer to the image border are not used |
 | `min_calibration_views`, `calibrate_every_views` | first background calibration at this many views, then after every this many new views |
-| `free_k3_after_views` | k3 (fisheye: k3 and k4) stays 0 below this many views |
+| `fix_higher_order` | hold k3 (fisheye: k3 and k4) at 0, for a lens that needs no higher-order distortion terms (default false) |
 | `outlier_z_limit` | final pass: robust z-score of a view's leave-one-out error that flags it |
 | `outlier_min_views` | final pass: no outlier check with fewer views |
 | `outlier_max_uncertainty_increase` | final pass: a flagged view is kept as a suspect if removing it raises the mean uncertainty from the views' coverage by more than this factor |

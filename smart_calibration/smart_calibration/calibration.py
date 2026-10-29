@@ -230,17 +230,17 @@ def uncertainty_hints(uncertainty):
     return ()
 
 
-def calibrate_views(object_points, image_points, image_size, free_k3_after_views,
+def calibrate_views(object_points, image_points, image_size, fix_higher_order=False,
                     with_leave_one_out=False, model=PLUMB_BOB):
     """
     Calibrate with a camera model and estimate the uncertainty; return a CalibrationResult.
 
-    k3 (and k4) stay 0 below free_k3_after_views views. Raises cv2.error if OpenCV cannot
+    fix_higher_order: hold k3 (fisheye: k3 and k4) at 0. Raises cv2.error if OpenCV cannot
     calibrate.
     """
     start = time.perf_counter()
     image_size = tuple(image_size)
-    fix_k3 = len(object_points) < free_k3_after_views
+    fix_k3 = bool(fix_higher_order)
     total_rms, camera_matrix, distortion, rvecs, tvecs = model.calibrate(
         object_points, image_points, image_size, fix_k3)
     used = [i for i in range(len(model.parameters)) if not (fix_k3 and i in model.high_order)]
@@ -340,7 +340,7 @@ class FinalResult:
         return self.final.view_residuals[self.kept.index(index)]
 
 
-def final_calibration(object_points, image_points, image_size, free_k3_after_views,
+def final_calibration(object_points, image_points, image_size, fix_higher_order,
                       z_limit, min_views, max_uncertainty_increase,
                       max_removed_fraction, forced=(), progress=None, model=PLUMB_BOB):
     """
@@ -349,7 +349,8 @@ def final_calibration(object_points, image_points, image_size, free_k3_after_vie
     With at least min_views views, the view with the highest leave-one-out z-score above z_limit
     is removed if that raises the mean uncertainty by at most max_uncertainty_increase, else
     kept as a suspect. At most max_removed_fraction of the views; never one in forced.
-    progress(text) is called before each calibration. model: the camera model.
+    progress(text) is called before each calibration. model: the camera model;
+    fix_higher_order: see calibrate_views().
     """
     forced = tuple(sorted(set(forced)))
     count = len(object_points)
@@ -357,7 +358,7 @@ def final_calibration(object_points, image_points, image_size, free_k3_after_vie
     def calibrate_subset(indices):
         return calibrate_views([object_points[i] for i in indices],
                                [image_points[i] for i in indices], image_size,
-                               free_k3_after_views, True, model)
+                               fix_higher_order, True, model)
 
     if progress:
         progress(f'calibrating all {count} views')
