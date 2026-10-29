@@ -1,4 +1,4 @@
-# calibration_node settings for the ircam_wide camera. Select a file with params_file:=<path>.
+# calibration_node settings for a fisheye camera. Select a file with params_file:=<path>.
 # Parameters marked (startup) need a restart; all others can be changed while running, from the
 # GUI or with `ros2 param set /calibration_node <name> <value>`.
 calibration_node:

@@ -25,9 +25,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'params_file',
             default_value=PathJoinSubstitution(
-                [FindPackageShare('smart_calibration'), 'config', 'example_config.yaml']),
+                [FindPackageShare('smart_calibration'), 'config', 'plumb_bob_chessboard.yaml']),
             description='calibration_node parameters: board size, preprocessing, detector '
-                        'flags (see config/example_config.yaml).'),
+                        'flags (see config/plumb_bob_chessboard.yaml).'),
         DeclareLaunchArgument(
             'log_level',
             default_value='info',

@@ -99,8 +99,8 @@ ros2 launch smart_calibration gui.launch.py
 
 | Launch argument | Default | |
 |---|---|---|
-| `image_topic` | `/ircam_wide/decoded` | camera image topic (the GUI only uses it for the raw view) |
-| `params_file` | installed `config/ircam_wide.yaml` | node parameters (not for `gui.launch.py`) |
+| `image_topic` | `/camera/image_raw` | camera image topic (the GUI only uses it for the raw view) |
+| `params_file` | installed `config/plumb_bob_chessboard.yaml` | node parameters (not for `gui.launch.py`) |
 | `log_level` | `info` | `debug` logs one line per frame (not for `gui.launch.py`) |
 | `calibration_node` | `/calibration_node` | node the GUI connects to (`gui.launch.py` only) |
 
@@ -187,10 +187,17 @@ squares for `square_size`.
 
 ## Parameters
 
-Set in the parameter file ([config/ircam_wide.yaml](smart_calibration/config/ircam_wide.yaml),
-one per camera). Except for the startup ones, they can be changed while running, from the GUI or
-with `ros2 param set /calibration_node <name> <value>`. Such changes are not written back to the
-file.
+Set in the parameter file. [smart_calibration/config/](smart_calibration/config/) has a reference
+file for each combination of camera model and board; copy the one that matches your setup and
+adjust it to your camera and board:
+
+| | `chessboard` | `oversized_marker` |
+|---|---|---|
+| `plumb_bob` | [plumb_bob_chessboard.yaml](smart_calibration/config/plumb_bob_chessboard.yaml) | [plumb_bob_oversized.yaml](smart_calibration/config/plumb_bob_oversized.yaml) |
+| `fisheye` | [fisheye_chessboard.yaml](smart_calibration/config/fisheye_chessboard.yaml) | [fisheye_oversized.yaml](smart_calibration/config/fisheye_oversized.yaml) |
+
+Except for the startup ones, the parameters can be changed while running, from the GUI or with
+`ros2 param set /calibration_node <name> <value>`. Such changes are not written back to the file.
 
 | Parameter | Meaning |
 |---|---|

@@ -73,7 +73,7 @@ class BoardSpec:
         return coordinates
 
 
-# 6 x 7 inner corners, like config/ircam_wide.yaml.
+# 6 x 7 inner corners.
 CHESSBOARD = BoardSpec('chessboard', 7, 8, 60.0, 60.0)
 # Oversized radon checkerboard; the marker L has exactly one white cell, (7, 4): the origin.
 MARKER_BOARD = BoardSpec('oversized_marker', 14, 10, 50.0, 50.0,
