@@ -8,7 +8,11 @@ __pycache__/
 # Generated test images (regenerate with utility/synthetic_dataset.py)
 dataset/
 
+# Ignore all SVG files except those in the assets directory
 *.svg
+!assets/*.svg
+
+# Ignore all config files except the example ones in the config directory
 smart_calibration/config/*
 !smart_calibration/config/fisheye_chessboard.yaml
 !smart_calibration/config/fisheye_oversized.yaml

@@ -4,7 +4,7 @@
 # Copyright the OpenCV authors (see THIRD_PARTY_NOTICES.md). Licensed under the Apache License,
 # Version 2.0.
 # SPDX-License-Identifier: Apache-2.0
-# Modifications: none
+# Modifications: added the -b/--background option.
 """generate_pattern.py
 Usage example:
 python generate_pattern.py -o out.svg -r 11 -c 8 -T circles -s 20.0 -R 5.0 -u mm -w 216 -h 279
@@ -22,6 +22,7 @@ python generate_pattern.py -o out.svg -r 11 -c 8 -T circles -s 20.0 -R 5.0 -u mm
 -p, --aruco_marker_size - aruco markers size for ChAruco pattern (default 10.0)
 -f, --dict_file - file name of custom aruco dictionary for ChAruco pattern
 -do, --dict_offset - index of the first ArUco index used
+-b, --background - white background one square larger than the pattern on each side
 -H, --help - show help
 """
 
@@ -243,6 +244,27 @@ class PatternMaker:
 
                             x_ += 1
 
+    def _pattern_size(self, p_type):
+        spacing = self.square_size
+        r = spacing / self.radius_rate
+        if p_type == "circles":
+            return (self.cols - 1.0) * spacing + 2.0 * r, (self.rows - 1.0) * spacing + 2.0 * r
+        if p_type == "acircles":
+            return ((self.cols - 1.0) * 2 * spacing + spacing + 2.0 * r,
+                    (self.rows - 1.0) * spacing + 2.0 * r)
+        return self.cols * spacing, self.rows * spacing
+
+    def add_background(self, p_type):
+        """Put a white rectangle one square larger than the pattern on each side behind it."""
+        pattern_width, pattern_height = self._pattern_size(p_type)
+        width = pattern_width + 2.0 * self.square_size
+        height = pattern_height + 2.0 * self.square_size
+        if width > self.width or height > self.height:
+            print("Warning: background {}x{} is larger than the page {}x{} and is cut off".format(
+                width, height, self.width, self.height))
+        self.g.prepend(SVG("rect", x=(self.width - width) / 2.0, y=(self.height - height) / 2.0,
+                           width=width, height=height, fill="white", stroke="none"))
+
     def save(self):
         c = canvas(self.g, width="%d%s" % (self.width, self.units), height="%d%s" % (self.height, self.units),
                    viewBox="0 0 %d %d" % (self.width, self.height))
@@ -281,6 +303,8 @@ def main():
                         action="store", dest="dict_file", type=str)
     parser.add_argument("-do", "--dict_offset", help="index of the first ArUco index used", default=0,
                         action="store", dest="dict_offset", type=int)
+    parser.add_argument("-b", "--background", help="white background one square larger than the pattern on "
+                                                   "each side", action="store_true", dest="background")
     args = parser.parse_args()
 
     show_help = args.show_help
@@ -328,6 +352,8 @@ def main():
           "checkerboard": pm.make_checkerboard_pattern, "radon_checkerboard": pm.make_radon_checkerboard_pattern,
          "charuco_board": pm.make_charuco_board}
     mp[p_type]()
+    if args.background:
+        pm.add_background(p_type)
     # this should save pattern to output
     pm.save()
 

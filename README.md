@@ -5,7 +5,9 @@ chessboard in the camera stream, keeps only good and new views, and calibrates i
 while a GUI shows where the calibration is still uncertain. When enough views are collected, a
 final pass removes outlier views, and the result is saved as an OpenCV YAML file.
 
-![Collecting calibration views with a thermal camera: live corner detection, view checks and the calibration status](assets/sc_example_1.gif)
+<p align="center">
+  <img src="assets/sc_example_1.gif" alt="Collecting calibration views with a thermal camera: live corner detection, view checks and the calibration status">
+</p>
 
 - **Board modes:** a plain chessboard, or an oversized radon checkerboard with markers that only
   needs to be partly visible
@@ -117,7 +119,9 @@ ros2 launch smart_calibration gui.launch.py
    - **Suspect** (amber): a flagged view that is the only one of its region. Add views there.
 4. **Accept** saves the calibration to `output_file`, on the machine running the node.
 
-![After Finish: all kept views over the last frame, a selected view with its corner errors, and Accept](assets/sc_example_2.gif)
+<p align="center">
+  <img src="assets/sc_example_2.gif" alt="After Finish: all kept views over the last frame, a selected view with its corner errors, and Accept">
+</p>
 
 Check **undistorted** in the View box to see the stream undistorted by the current calibration.
 A dashed amber line marks where the distortion model is not valid yet; views near the image
@@ -145,6 +149,19 @@ calibration_time: "2026-10-26 15:02:11"
 
 ## Boards
 
+<div align="center">
+<table>
+  <tr>
+    <th><code>chessboard</code></th>
+    <th><code>oversized_marker</code></th>
+  </tr>
+  <tr>
+    <td><img src="assets/checkerboard_6x7.svg" alt="Chessboard of 7 × 8 squares (6 × 7 inner corners) on a white border" width="300"></td>
+    <td><img src="assets/radon_oversized.svg" alt="Radon checkerboard of 7 × 13 squares with three marker dots in an L at its middle" width="300"></td>
+  </tr>
+</table>
+</div>
+
 - **`chessboard`:** a plain chessboard, always completely visible. Set `board_cols` and
   `board_rows` to its **inner** corners (squares − 1). Leave a white border of about one square.
 - **`oversized_marker`:** a radon checkerboard larger than the camera's view. Three marker dots
@@ -160,7 +177,13 @@ python utility/generate_pattern.py -o radon.svg -T radon_checkerboard -c 14 -r 1
     -u mm -w 800 -h 600 -m 7 4 8 4 7 5
 ```
 
-Print it flat and rigid, and measure the printed square size for `square_size`.
+The SVG is transparent apart from the pattern. `-b` adds a white background that extends one
+square beyond the pattern on each side, which needs a page at least two squares wider and taller
+than the pattern.
+
+The SVG is at true size in the given units. Print it at 100 % scale ("actual size", with "fit to
+page" turned off), mount it flat and rigid, and measure the printed square size over several
+squares for `square_size`.
 
 ## Parameters
 

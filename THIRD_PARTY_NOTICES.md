@@ -8,7 +8,8 @@ following files from other projects, under their own licences.
 | `utility/generate_pattern.py` | OpenCV, [`apps/pattern-tools/generate_pattern.py`](https://github.com/opencv/opencv/blob/4.x/apps/pattern-tools/generate_pattern.py), 4.x branch | Apache License 2.0 | the OpenCV authors (see below) |
 | `utility/svgfig.py` | OpenCV, [`apps/pattern-tools/svgfig.py`](https://github.com/opencv/opencv/blob/4.x/apps/pattern-tools/svgfig.py), 4.x branch (earlier revision) | BSD 3-Clause (full text in the file header) | 2022, Jim Pivarski |
 
-`generate_pattern.py` is unmodified apart from an added attribution header. `svgfig.py` is
+`generate_pattern.py` is modified: an added attribution header and the `-b`/`--background`
+option (a white background behind the pattern). `svgfig.py` is
 unmodified apart from an added attribution line above its licence header.
 
 ## OpenCV copyright notice
