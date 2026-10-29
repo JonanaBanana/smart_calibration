@@ -37,7 +37,7 @@ LIVE_PARAMETERS = ('gamma', 'stretch_low_percentile', 'stretch_high_percentile',
                    'detector_normalize', 'detector_exhaustive', 'detector_accuracy',
                    'max_board_speed_rel', 'max_corner_residual', 'border_margin_px',
                    'min_view_distance', 'calibrate_every_views', 'min_calibration_views',
-                   'free_k3_after_views', 'uncertainty_scale', 'outlier_z_limit',
+                   'free_k3_after_views', 'outlier_z_limit',
                    'outlier_min_views', 'outlier_max_uncertainty_increase',
                    'outlier_max_fraction', 'output_file')
 # Thumbnails of the kept views, for the GUI.
@@ -86,7 +86,6 @@ def calibration_message(result, header):
     state.camera_matrix = result.camera_matrix.ravel().tolist()
     state.distortion = result.distortion.tolist()
     state.std_deviations = result.std_deviations.tolist()
-    state.uncertainty_scale = result.uncertainty_scale
     state.uncertainty = result.uncertainty['total']
     state.focal_uncertainty = result.uncertainty['focal']
     state.centre_uncertainty = result.uncertainty['centre']
@@ -220,8 +219,6 @@ class CalibrationNode(Node):
         self.declare_parameter('free_k3_after_views', 20, ParameterDescriptor(
             description='k3 (fisheye: k3 and k4) stays 0 below this many views.',
             integer_range=[IntegerRange(from_value=0, to_value=10000, step=1)]))
-        self.declare_parameter('uncertainty_scale', 2.0, float_range(
-            0.1, 100.0, 'Factor on the estimated uncertainties.'))
         # Final calibration pass.
         self.declare_parameter('outlier_z_limit', 6.0, float_range(
             1.0, 100.0, 'Robust z-score of the leave-one-out error that flags a view.'))
@@ -445,7 +442,7 @@ class CalibrationNode(Node):
         self._requested_views = count
         objects, images, size = self.views.calibration_input()
         self._queue_calibration(('background', objects, images, size, header,
-                                 live['free_k3_after_views'], live['uncertainty_scale']))
+                                 live['free_k3_after_views']))
 
     def _queue_calibration(self, request):
         """Replace any waiting calibration request."""
@@ -468,9 +465,9 @@ class CalibrationNode(Node):
             if not self.context.ok():
                 return
 
-    def run_background(self, objects, images, size, header, free_k3_after_views, scale):
+    def run_background(self, objects, images, size, header, free_k3_after_views):
         try:
-            result = calibrate_views(objects, images, size, free_k3_after_views, scale,
+            result = calibrate_views(objects, images, size, free_k3_after_views,
                                      model=self.camera_model)
         except (cv2.error, np.linalg.LinAlgError) as error:
             self.get_logger().warn(f'calibration from {len(objects)} views failed: {error}')
@@ -498,7 +495,7 @@ class CalibrationNode(Node):
         start = time.perf_counter()
         try:
             result = final_calibration(
-                objects, images, size, live['free_k3_after_views'], live['uncertainty_scale'],
+                objects, images, size, live['free_k3_after_views'],
                 live['outlier_z_limit'], live['outlier_min_views'],
                 live['outlier_max_uncertainty_increase'], live['outlier_max_fraction'], keep,
                 progress, self.camera_model)

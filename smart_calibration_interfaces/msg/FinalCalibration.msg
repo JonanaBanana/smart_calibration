@@ -28,17 +28,18 @@ CalibrationState initial
 CalibrationState final
 
 # Outlier check: a view whose leave-one-out error (how badly the other views predict it) has a
-# robust z-score above z_limit is removed, unless removing it raised the mean uncertainty over the
-# image by more than outlier_max_uncertainty_increase (no other view covers its region): then it
-# is a suspect.
+# robust z-score above z_limit is removed, unless removing it raised the mean coverage
+# uncertainty over the image by more than outlier_max_uncertainty_increase (no other view covers
+# its region): then it is a suspect.
 bool checked                           # false: too few views for the check (outlier_min_views)
 float32 z_limit
 float32 limit                          # leave-one-out error with z = z_limit among all views, px
 float32[] leave_one_out                # per view, from the calibration with all views, px
 uint32[] removed                       # in removal order
 float32[] removed_z
-# Mean uncertainty over the image without the view / with it; inf if without it the lens model
-# has no valid ray for part of the image (it folds over where no other view has corners).
+# Mean coverage uncertainty over the image (from independent corner errors, so it depends on where
+# the views are) without the view / with it; inf if without it the lens model has no valid ray
+# for part of the image (it folds over where no other view has corners).
 float32[] removed_uncertainty_ratio
 uint32[] suspects
 float32[] suspects_z

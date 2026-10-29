@@ -421,11 +421,11 @@ def to_integer_image(image, bit_depth):
     return np.rint(image * 4095).astype(np.uint16)  # 12-bit sensor in a 16-bit image
 
 
-def generate(output, model, counts, seed, bit_depth, supersample):
+def generate(output, model, counts, seed, bit_depth, supersample, fov_deg=90.0):
     output = Path(output)
     (output / 'images').mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
-    camera = make_camera(model)
+    camera = make_camera(model, fov_deg=fov_deg)
     print(f'{model} camera {camera.width}x{camera.height}, f = {camera.K[0, 0]:.1f} px; '
           'casting the pixel rays ...')
     rays = supersampled_rays(camera, supersample)
@@ -497,10 +497,12 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--bit-depth', type=int, choices=(8, 16), default=8)
     parser.add_argument('--supersample', type=int, default=3)
+    parser.add_argument('--fov', type=float, default=90.0,
+                        help='horizontal field of view, degrees')
     args = parser.parse_args()
     generate(args.output, args.model, {'chessboard': args.chessboard,
                                        'oversized_marker': args.marker, 'empty': args.empty},
-             args.seed, args.bit_depth, args.supersample)
+             args.seed, args.bit_depth, args.supersample, args.fov)
 
 
 if __name__ == '__main__':

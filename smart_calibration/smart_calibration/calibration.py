@@ -3,10 +3,13 @@ Calibration from the kept views, its uncertainty, and the final pass.
 
 The lens model is a camera_models.CameraModel.
 
-The covariance of the intrinsics comes from the Gauss-Newton normal equations, the point noise
-from the residuals. It is propagated to an uncertainty map over the image. It assumes independent
-corner errors, so it underestimates the true error (uncertainty_scale) and a small value alone does
-not prove a good calibration.
+The uncertainty of the intrinsics is the jackknife over the views: the spread of the linearized
+leave-one-view-out solutions. It allows correlated corner errors within a view, but assumes
+independent views, so errors common to all views (a detector bias that depends on the image
+position, a lens the model does not fit) are not included. It never falls below the covariance
+for independent corner errors (Gauss-Newton normal equations, noise from the residuals), which
+also covers the directions few views leave the jackknife blind to. Both are propagated to an
+uncertainty map over the image. A small uncertainty alone does not prove a good calibration.
 
 The final pass removes views the other views predict badly (leave-one-out error), unless removing
 one raises the uncertainty too much: then no other view covers its region, and it is kept.
@@ -31,7 +34,7 @@ AXIS_ALIGNED_DEG = 10.0
 
 @dataclass(frozen=True)
 class CalibrationResult:
-    """One calibration and its uncertainty (scaled by uncertainty_scale)."""
+    """One calibration and its uncertainty."""
 
     camera_model: object          # camera_models.CameraModel
     image_size: tuple             # (width, height)
@@ -42,10 +45,10 @@ class CalibrationResult:
     noise: float                  # point noise estimated from the residuals, px
     camera_matrix: np.ndarray     # (3, 3)
     distortion: np.ndarray        # plumb_bob (5,) k1, k2, p1, p2, k3; fisheye (4,) k1-k4
-    std_deviations: np.ndarray    # per camera_model.parameters, scaled; 0 for a fixed parameter
-    uncertainty_scale: float
+    std_deviations: np.ndarray    # per camera_model.parameters; 0 for a fixed parameter
     uncertainty: dict             # 'total' and each group: largest map value, px
     uncertainty_map: np.ndarray   # (rows, cols) px, NaN where the model has no ray
+    coverage_map: np.ndarray      # as uncertainty_map, independent corner errors only
     view_rms: np.ndarray          # (views,) reprojection error per view, px
     view_tilts: np.ndarray        # (views, 2) board_tilt() of each view, degrees
     view_residuals: tuple         # per view (N, 2): detected minus projected corners, px
@@ -92,20 +95,31 @@ def intrinsic_covariance(terms, used):
     return noise ** 2 * np.linalg.pinv(reduced), noise
 
 
-def leave_one_out(terms):
+def _leave_one_out_steps(terms):
     """
-    Return per view its residuals when the other views calibrate and only its pose is fitted.
+    Return per view the change of the intrinsics when the other views calibrate (k, used).
 
     Linearized: one Gauss-Newton step from the full solution without the view.
     """
     reduced = [a.T @ _without_pose(b, a) for _, a, b in terms]
     gradients = [a.T @ _without_pose(b, r) for r, a, b in terms]
     total = sum(reduced)
-    result = []
-    for (r, a, b), view_reduced, gradient in zip(terms, reduced, gradients):
-        step = -np.linalg.pinv(total - view_reduced) @ gradient
-        result.append(_without_pose(b, r - a @ step))
-    return result
+    return np.array([-np.linalg.pinv(total - view_reduced) @ gradient
+                     for view_reduced, gradient in zip(reduced, gradients)])
+
+
+def jackknife_covariance(terms):
+    """Return the jackknife covariance of the intrinsics over the views; terms: view_terms()."""
+    steps = _leave_one_out_steps(terms)
+    steps = steps - steps.mean(axis=0)
+    views = len(terms)
+    return (views - 1) / views * steps.T @ steps
+
+
+def leave_one_out(terms):
+    """Return per view its residuals when the other views calibrate and only its pose is fitted."""
+    return [_without_pose(b, r - a @ step)
+            for (r, a, b), step in zip(terms, _leave_one_out_steps(terms))]
 
 
 def rms(residuals):
@@ -217,7 +231,7 @@ def uncertainty_hints(uncertainty):
 
 
 def calibrate_views(object_points, image_points, image_size, free_k3_after_views,
-                    uncertainty_scale, with_leave_one_out=False, model=PLUMB_BOB):
+                    with_leave_one_out=False, model=PLUMB_BOB):
     """
     Calibrate with a camera model and estimate the uncertainty; return a CalibrationResult.
 
@@ -232,15 +246,17 @@ def calibrate_views(object_points, image_points, image_size, free_k3_after_views
     used = [i for i in range(len(model.parameters)) if not (fix_k3 and i in model.high_order)]
     terms = view_terms(model, object_points, image_points, camera_matrix, distortion, rvecs,
                        tvecs, used)
-    covariance, noise = intrinsic_covariance(terms, used)
-    covariance = covariance * uncertainty_scale ** 2
+    independent, noise = intrinsic_covariance(terms, used)
+    jackknife = jackknife_covariance(terms)
     predicted = leave_one_out(terms) if with_leave_one_out else None
-    maps = uncertainty_maps(model, camera_matrix, distortion, covariance, used,
-                            map_grid(image_size))
+    grid = map_grid(image_size)
+    maps = uncertainty_maps(model, camera_matrix, distortion, jackknife, used, grid)
+    floor = uncertainty_maps(model, camera_matrix, distortion, independent, used, grid)
+    maps = {name: np.fmax(m, floor[name]) for name, m in maps.items()}
     uncertainty = {name: float(np.nanmax(m)) if np.isfinite(m).any() else math.nan
                    for name, m in maps.items()}
     std = np.zeros(len(model.parameters))
-    std[used] = np.sqrt(np.diag(covariance))
+    std[used] = np.sqrt(np.maximum(np.diag(jackknife), np.diag(independent)))
     tilts = np.array([board_tilt(rvec) for rvec in rvecs])
     folds = model.folds_in_image(camera_matrix, distortion, image_size)
     return CalibrationResult(
@@ -248,9 +264,9 @@ def calibrate_views(object_points, image_points, image_size, free_k3_after_views
         points=sum(len(points) for points in object_points), k3_fixed=fix_k3,
         rms=float(total_rms),
         noise=noise, camera_matrix=camera_matrix, distortion=distortion, std_deviations=std,
-        uncertainty_scale=uncertainty_scale,
         uncertainty=uncertainty,
-        uncertainty_map=maps['total'], view_rms=np.array([rms(r) for r, _, _ in terms]),
+        uncertainty_map=maps['total'], coverage_map=floor['total'],
+        view_rms=np.array([rms(r) for r, _, _ in terms]),
         view_tilts=tilts, view_residuals=tuple(r.reshape(-1, 2) for r, _, _ in terms),
         leave_one_out=None if predicted is None else np.array([rms(r) for r in predicted]),
         leave_one_out_residuals=None if predicted is None else tuple(
@@ -276,14 +292,19 @@ def robust_limit(values, z_limit):
 
 
 def uncertainty_ratio(after, before):
-    """Return the ratio of the mean uncertainty over the image, after / before (inf: no ray)."""
-    both = np.isfinite(before.uncertainty_map)
+    """
+    Return the ratio of the mean coverage_map value over the image, after / before (inf: no ray).
+
+    The coverage map depends on where the views are, not on their errors, so a bad view does
+    not lower the ratio by inflating the uncertainty with it.
+    """
+    both = np.isfinite(before.coverage_map)
     if not both.any():
         return 1.0
-    after_values = after.uncertainty_map[both]
+    after_values = after.coverage_map[both]
     if not np.isfinite(after_values).all():
         return math.inf
-    return float(after_values.mean() / before.uncertainty_map[both].mean())
+    return float(after_values.mean() / before.coverage_map[both].mean())
 
 
 @dataclass(frozen=True)
@@ -294,7 +315,7 @@ class FlaggedView:
     z: float                   # robust z-score of its leave-one-out error when it was flagged
     error: float               # that leave-one-out error, px
     residuals: np.ndarray      # (N, 2) its corners' leave-one-out residuals, px
-    uncertainty_ratio: float   # mean uncertainty over the image without it / with it
+    uncertainty_ratio: float   # mean coverage_map value without it / with it
 
 
 @dataclass(frozen=True)
@@ -320,7 +341,7 @@ class FinalResult:
 
 
 def final_calibration(object_points, image_points, image_size, free_k3_after_views,
-                      uncertainty_scale, z_limit, min_views, max_uncertainty_increase,
+                      z_limit, min_views, max_uncertainty_increase,
                       max_removed_fraction, forced=(), progress=None, model=PLUMB_BOB):
     """
     Calibrate, remove clear outliers one at a time, and return a FinalResult.
@@ -336,7 +357,7 @@ def final_calibration(object_points, image_points, image_size, free_k3_after_vie
     def calibrate_subset(indices):
         return calibrate_views([object_points[i] for i in indices],
                                [image_points[i] for i in indices], image_size,
-                               free_k3_after_views, uncertainty_scale, True, model)
+                               free_k3_after_views, True, model)
 
     if progress:
         progress(f'calibrating all {count} views')

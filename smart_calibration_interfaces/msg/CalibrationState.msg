@@ -28,12 +28,8 @@ float64 noise
 float64[9] camera_matrix
 float64[] distortion
 
-# Standard deviation of fx, fy, cx, cy and each distortion coefficient (0 if fixed), times
-# uncertainty_scale.
+# Standard deviation of fx, fy, cx, cy and each distortion coefficient (0 if fixed).
 float64[] std_deviations
-
-# All uncertainties below are multiplied by this (the raw ones underestimate the true error).
-float32 uncertainty_scale
 
 # Largest uncertainty over the image, px: from all parameters, and from each parameter group
 # alone (the others taken as exact).

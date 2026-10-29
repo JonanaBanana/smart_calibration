@@ -34,7 +34,6 @@ calibration_node:
     min_calibration_views: 15    # first calibration at this many views
     calibrate_every_views: 10    # then after every this many new views
     free_k3_after_views: 35     # k3 (fisheye: k3, k4) stays 0 below this many views
-    uncertainty_scale: 2.0      # factor on the estimated uncertainty, which comes out too small
 
     # Final calibration (Finish): remove views the other views predict badly
     outlier_z_limit: 6.0                    # robust z-score that flags a view

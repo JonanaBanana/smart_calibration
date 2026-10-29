@@ -183,10 +183,9 @@ file.
 | `border_margin_px` | corners closer to the image border are not used |
 | `min_calibration_views`, `calibrate_every_views` | first background calibration at this many views, then after every this many new views |
 | `free_k3_after_views` | k3 (fisheye: k3 and k4) stays 0 below this many views |
-| `uncertainty_scale` | factor on the estimated uncertainty, which assumes independent corner errors and comes out too small |
 | `outlier_z_limit` | final pass: robust z-score of a view's leave-one-out error that flags it |
 | `outlier_min_views` | final pass: no outlier check with fewer views |
-| `outlier_max_uncertainty_increase` | final pass: a flagged view is kept as a suspect if removing it raises the mean uncertainty by more than this factor |
+| `outlier_max_uncertainty_increase` | final pass: a flagged view is kept as a suspect if removing it raises the mean uncertainty from the views' coverage by more than this factor |
 | `outlier_max_fraction` | final pass: at most this fraction of the views is removed |
 | `output_file` | where Accept saves; strftime placeholders (`%Y`, `%m`, ...) and `~` work |
 | `image_qos` | `auto` (match the camera), `reliable` or `best_effort` (startup) |
@@ -226,9 +225,11 @@ python utility/evaluate_dataset.py dataset/synthetic --exhaustive --visualize da
 ```
 
 `utility/uncertainty_prototype.py` and `utility/outlier_prototype.py` are the experiments behind
-the uncertainty scale and the outlier rules. `utility/fisheye_benchmark.py` compares the fisheye
-calibrator with `cv2.fisheye.calibrate` on synthetic lenses from 140° to 260° (`--few-views` for
-the background calibrations' 5 to 30 views).
+the uncertainty map and the outlier rules; `utility/uncertainty_methods_prototype.py` compares
+covariance estimates against the true error (the jackknife over views is used).
+`utility/fisheye_benchmark.py` compares the fisheye calibrator with `cv2.fisheye.calibrate` on
+synthetic lenses from 140° to 260° (`--few-views` for the background calibrations' 5 to 30
+views).
 
 ```
 smart_calibration/                 repository root

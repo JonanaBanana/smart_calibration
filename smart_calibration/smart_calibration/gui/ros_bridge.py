@@ -27,6 +27,9 @@ from smart_calibration_interfaces.srv import Finish, GetView
 PREVIEW_BUFFER_SIZE = 10
 RAW_BUFFER_SIZE = 30
 DETECTION_BUFFER_SIZE = 30
+# Polled requests without a reply are sent again after this: the node can drop a reply to a
+# client it has not fully discovered yet ("failed to send response (timeout)").
+REPLY_TIMEOUT_S = 2.0
 
 Frame = collections.namedtuple('Frame', ['stamp_ns', 'image', 'encoding'])
 
@@ -149,6 +152,7 @@ class GuiNode(Node):
         self._accept_client = self.create_client(Trigger, f'{self.target}/accept')
         self._view_client = self.create_client(GetView, f'{self.target}/get_view')
         self._views = {}  # (run, index) -> KeptView, or None while requested
+        self._view_requests = {}  # (run, index) -> time.monotonic() of the request
         self._service_message = None
 
         # Raw camera stream, subscribed only while shown.
@@ -157,7 +161,8 @@ class GuiNode(Node):
 
         # The calibration node's parameters: fetched once, then updated from parameter events.
         self.parameters = {}
-        self._parameters_requested = False
+        self._have_parameters = False
+        self._parameters_requested = None  # time.monotonic() of the pending request
         self._get_client = self.create_client(GetParameters, f'{self.target}/get_parameters')
         self._set_client = self.create_client(SetParameters, f'{self.target}/set_parameters')
         self.create_subscription(ParameterEvent, '/parameter_events',
@@ -201,6 +206,7 @@ class GuiNode(Node):
         with self._lock:
             if self._final is not None and msg.run != self._final.run:
                 self._views.clear()  # they belong to the previous pass
+                self._view_requests.clear()
             self._final = msg
 
     def raw_callback(self, msg):
@@ -262,10 +268,14 @@ class GuiNode(Node):
 
     def poll_parameters(self, names):
         """Fetch the calibration node's parameters once it is reachable; call regularly."""
+        now = time.monotonic()
         with self._lock:
-            if self._parameters_requested or not self._get_client.service_is_ready():
+            if self._have_parameters or not self._get_client.service_is_ready():
                 return
-            self._parameters_requested = True
+            sent = self._parameters_requested
+            if sent is not None and now - sent < REPLY_TIMEOUT_S:
+                return
+            self._parameters_requested = now
         future = self._get_client.call_async(GetParameters.Request(names=list(names)))
         future.add_done_callback(lambda done: self._store_parameters(names, done))
 
@@ -273,10 +283,11 @@ class GuiNode(Node):
         response = future.result()
         with self._lock:
             if response is None or len(response.values) != len(names):
-                self._parameters_requested = False  # try again on the next poll
+                self._parameters_requested = None  # try again on the next poll
                 return
             for name, value in zip(names, response.values):
                 self.parameters[name] = parameter_value_to_python(value)
+            self._have_parameters = True
 
     def set_parameter(self, name, value):
         """Ask the calibration node to change a parameter; False if it is unreachable."""
@@ -295,7 +306,8 @@ class GuiNode(Node):
         reason = response.results[0].reason if response is not None and response.results else ''
         self.get_logger().warn(f'calibration node rejected {name}: {reason}')
         with self._lock:
-            self._parameters_requested = False  # re-read the actual value
+            self._have_parameters = False  # re-read the actual value
+            self._parameters_requested = None
 
     def parameter_event_callback(self, msg):
         if msg.node != self.target:
@@ -338,10 +350,15 @@ class GuiNode(Node):
 
     def request_view(self, run, index):
         """Fetch a kept view of final pass run once; it appears in snapshot().views."""
+        key, now = (run, index), time.monotonic()
         with self._lock:
-            if (run, index) in self._views or not self._view_client.service_is_ready():
+            if not self._view_client.service_is_ready():
                 return
-            self._views[(run, index)] = None
+            if key in self._views and (self._views[key] is not None or
+                                       now - self._view_requests[key] < REPLY_TIMEOUT_S):
+                return
+            self._views[key] = None
+            self._view_requests[key] = now
         future = self._view_client.call_async(GetView.Request(index=index))
         future.add_done_callback(lambda done: self._store_view(run, index, done))
 

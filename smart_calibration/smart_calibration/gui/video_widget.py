@@ -19,8 +19,8 @@ STATUS_COLORS = {
 STATUS_VALUE_WIDTHS = ('not found', '0.000 w/s', 'kept #000')
 
 # Uncertainty map colours: green up to MAP_GOOD_PX, red from MAP_BAD_PX (logarithmic).
-MAP_GOOD_PX = 0.25
-MAP_BAD_PX = 2.0
+MAP_GOOD_PX = 0.4
+MAP_BAD_PX = 4.0
 MAP_ALPHA = 110
 MAP_COLORS = np.array([[0, 200, 0], [255, 220, 0], [255, 40, 40]], np.float64)
 
